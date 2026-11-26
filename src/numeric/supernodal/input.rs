@@ -12,24 +12,15 @@ use super::Li;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
 
-/// Where the entries of the permuted matrix live: a column part (by column:
-/// `col_ptr`, its indices `idx[..split]`) and, on the LU path, a row part (by
-/// row: `row_ptr`, its indices from `split`). Indices are sorted within each
-/// column and row, the order the assembly walks them in. A slot is a place
-/// in `idx`.
 pub(crate) struct InputProgram {
     n: usize,
     col_ptr: Vec<usize>,
     row_ptr: Vec<usize>,
-    /// The row of a slot in the column part, the column of one in the row
-    /// part.
     idx: Vec<Li>,
-    /// `src[p]`: the entry of `A` (its place in `A`'s values) at slot `p`.
     src: Vec<Li>,
 }
 
 impl InputProgram {
-    /// Heap bytes held by the program.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.col_ptr)
@@ -82,8 +73,6 @@ impl InputProgram {
             "the input program requires fewer than 2^32 entries"
         );
         let entries = || (0..n).flat_map(|j| (col_ptr[j]..col_ptr[j + 1]).map(move |k| (j, k)));
-        // Count per target column / row, place every entry's index and its
-        // place in `A` at its slot, then sort each column / row by index.
         let (mut cptr, mut rptr) = (vec![0usize; n + 1], vec![0usize; n + 1]);
         for (j, k) in entries() {
             match place(row_idx[k], j) {
@@ -114,13 +103,12 @@ impl InputProgram {
             src[p] = k as Li;
         }
         drop((cc, rc));
-        // (the indices of a run are distinct: the unstable sort is
-        // deterministic)
         let mut run: Vec<(Li, Li)> = Vec::new();
         let mut sort = |a: usize, b: usize| {
             run.clear();
             run.extend(idx[a..b].iter().copied().zip(src[a..b].iter().copied()));
             run.sort_unstable_by_key(|&(g, _)| g);
+            debug_assert!(run.windows(2).all(|w| w[0].0 < w[1].0));
             for (p, &(g, k)) in (a..b).zip(&run) {
                 idx[p] = g;
                 src[p] = k;
@@ -140,21 +128,15 @@ impl InputProgram {
     }
 }
 
-/// Target of one entry of `A` in the permuted matrix.
 enum Part {
     Col { col: usize, row: usize },
     Row { row: usize, col: usize },
 }
 
-/// One factorization's permuted input: the program over `A`'s values and
-/// the scaling the factorization applies to them.
 #[derive(Clone, Copy)]
 pub(crate) struct Input<'a, T> {
     prog: &'a InputProgram,
-    /// `A`'s values, in `A`'s order.
     vals: &'a [T],
-    /// The row and the column factor of the scaling by elimination index:
-    /// entry `(g, c)` of the permuted matrix is `A`'s times `row[g] * col[c]`.
     scale: Option<(&'a [f64], &'a [f64])>,
 }
 
@@ -168,7 +150,6 @@ impl<'a, T: Scalar> Input<'a, T> {
         Input { prog, vals, scale }
     }
 
-    /// The value at slot `p`, entry `(row, col)` of the permuted matrix.
     #[inline]
     fn value(self, p: usize, row: usize, col: usize) -> T {
         let v = self.vals[self.prog.src[p] as usize];

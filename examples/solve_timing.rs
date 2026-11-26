@@ -37,6 +37,9 @@ extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
 }
 
+#[cfg(target_os = "macos")]
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
 fn main() {
     if std::env::var("QOS").is_ok() {
         let n: usize = std::env::var("RAYON_NUM_THREADS")
@@ -49,7 +52,7 @@ fn main() {
                 std::thread::Builder::new().spawn(move || {
                     #[cfg(target_os = "macos")]
                     unsafe {
-                        pthread_set_qos_class_self_np(0x21, 0); // QOS_CLASS_USER_INTERACTIVE
+                        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
                     }
                     t.run()
                 })?;

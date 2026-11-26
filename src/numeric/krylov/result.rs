@@ -43,9 +43,6 @@ impl StopReason {
     }
 }
 
-/// Classify a COCG/COCR exit: `Converged` when the residual test passed,
-/// `Breakdown` when the loop broke early (iterations still left) on a zero
-/// short-recurrence denominator, else `MaxIter` (budget exhausted).
 #[inline]
 pub(super) fn stop_reason(converged: bool, iters: usize, max_iter: usize) -> StopReason {
     if converged {

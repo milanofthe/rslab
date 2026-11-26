@@ -19,7 +19,6 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 
-/// Grid strides for column-major linear indexing of an `ndim`-D grid.
 fn strides(dims: &[usize]) -> Vec<usize> {
     let mut s = vec![1usize; dims.len()];
     for d in 1..dims.len() {
@@ -28,10 +27,6 @@ fn strides(dims: &[usize]) -> Vec<usize> {
     s
 }
 
-/// The discrete divergence row for grid node `k`: central differences over each
-/// dimension, `(Du)_k = sum_a (u[k+e_a,a] - u[k-e_a,a]) / 2`. Returns `(dof, coeff)`
-/// entries into a component-major velocity vector (`dof(a,i) = a*n + i`). Missing
-/// (boundary) neighbours are dropped.
 fn divergence_row(k: usize, dims: &[usize], stride: &[usize], n: usize) -> Vec<(usize, f64)> {
     let ndim = dims.len();
     let mut e = Vec::with_capacity(2 * ndim);
@@ -47,8 +42,6 @@ fn divergence_row(k: usize, dims: &[usize], stride: &[usize], n: usize) -> Vec<(
     e
 }
 
-/// Component-decoupled vector Laplacian (`ndim` blocks) as `(diag, lower-tri)` over
-/// the component-major DOF vector, plus a caller-supplied Dirichlet diagonal load.
 fn vector_laplacian(
     dims: &[usize],
     stride: &[usize],
@@ -69,7 +62,7 @@ fn vector_laplacian(
                     diag[off + j] += 1.0;
                     tri.push((off + j, off + i, -1.0));
                 } else {
-                    diag[off + i] += 1.0; // Dirichlet ghost
+                    diag[off + i] += 1.0;
                 }
                 if c == 0 {
                     diag[off + i] += 1.0;
@@ -95,11 +88,9 @@ pub fn curl_curl(dims: &[usize], omega: f64, sigma: f64) -> CscMatrix<Complex<f6
     let ndof = ndim * n;
     let stride = strides(dims);
 
-    // Off-diagonal accumulator keyed by (hi, lo) with hi > lo (lower triangle).
     let mut off: HashMap<(usize, usize), f64> = HashMap::new();
     let mut diag = vec![0.0f64; ndof];
 
-    // + L (vector Laplacian).
     let (l_diag, l_tri) = vector_laplacian(dims, &stride, n);
     for (i, d) in l_diag.iter().enumerate() {
         diag[i] += *d;
@@ -107,7 +98,6 @@ pub fn curl_curl(dims: &[usize], omega: f64, sigma: f64) -> CscMatrix<Complex<f6
     for (r, c, w) in l_tri {
         *off.entry((r, c)).or_insert(0.0) += w;
     }
-    // - D^TD (grad-div): accumulate the outer product of each divergence row.
     for k in 0..n {
         let e = divergence_row(k, dims, &stride, n);
         for a in 0..e.len() {
@@ -121,7 +111,6 @@ pub fn curl_curl(dims: &[usize], omega: f64, sigma: f64) -> CscMatrix<Complex<f6
         }
     }
 
-    // Complex mass shift on the diagonal: -omega^2 M + i omega sigma M (M = I).
     let shift = Complex::new(-omega * omega, omega * sigma);
     let mut rows = Vec::with_capacity(ndof + off.len());
     let mut cols = Vec::with_capacity(ndof + off.len());
@@ -154,36 +143,31 @@ pub fn saddle_point<T: Scalar>(dims: &[usize], beta: f64) -> CscMatrix<T> {
     let ndim = dims.len();
     let n: usize = dims.iter().product();
     let stride = strides(dims);
-    let nu = ndim * n; // velocity DOFs
-    let ndof = nu + n; // + pressure DOFs
-    let pdof = |i: usize| nu + i;
+    let velocity_dofs = ndim * n;
+    let ndof = velocity_dofs + n;
+    let pdof = |i: usize| velocity_dofs + i;
 
     let mut diag = vec![0.0f64; ndof];
     let mut tri: Vec<(usize, usize, f64)> = Vec::new();
 
-    // A: velocity vector Laplacian (top-left, SPD).
     let (l_diag, l_tri) = vector_laplacian(dims, &stride, n);
     for (i, d) in l_diag.iter().enumerate() {
         diag[i] += *d;
     }
     tri.extend(l_tri);
 
-    // B / B^T: divergence coupling. Row = pressure dof (always > velocity dofs), so
-    // (pdof(k), vel_dof) is lower-triangle; symmetry supplies B^T.
     for k in 0..n {
         for (v, coeff) in divergence_row(k, dims, &stride, n) {
             tri.push((pdof(k), v, coeff));
         }
     }
 
-    // -betaC: pressure Laplacian stabilization (bottom-right, negative definite).
-    let (c_diag, c_tri) = vector_laplacian(dims, &stride, n); // ndim blocks; use block 0 (scalar)
+    let (c_diag, c_tri) = vector_laplacian(dims, &stride, n);
     for i in 0..n {
         diag[pdof(i)] -= beta * c_diag[i];
     }
     for (r, c, w) in c_tri {
         if r < n && c < n {
-            // block-0 (scalar) entries only
             tri.push((pdof(r), pdof(c), -beta * w));
         }
     }
@@ -243,10 +227,8 @@ pub fn convection_diffusion<T: Scalar>(
     let h: Vec<f64> = dims.iter().map(|&m| 1.0 / (m as f64 + 1.0)).collect();
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
     for p in 0..n {
-        // Multi-index and physical coordinates in (0,1)^d of interior node p.
         let ci: Vec<usize> = (0..d).map(|k| (p / s[k]) % dims[k]).collect();
         let x: Vec<f64> = (0..d).map(|k| (ci[k] as f64 + 1.0) * h[k]).collect();
-        // Advection velocity b(x).
         let b: Vec<f64> = match flow {
             Flow::Diagonal => vec![1.0 / (d as f64).sqrt(); d],
             Flow::Rotating => (0..d)
@@ -265,8 +247,6 @@ pub fn convection_diffusion<T: Scalar>(
             let has_hi = ci[k] + 1 < dims[k];
             let lo = p.wrapping_sub(s[k]);
             let hi = p + s[k];
-            // Diffusion off-diagonals (Dirichlet: a boundary neighbour is u=0, so
-            // its off-diagonal entry is simply omitted; the diagonal term stays).
             if has_lo {
                 rows.push(p);
                 cols.push(lo);
@@ -277,7 +257,6 @@ pub fn convection_diffusion<T: Scalar>(
                 cols.push(hi);
                 vals.push(T::from_real(-diff));
             }
-            // Advection: central `b_k(u_hi - u_lo)/(2h)` or first-order upwind.
             if upwind {
                 let a = b[k] / h[k];
                 if b[k] >= 0.0 {
@@ -288,7 +267,7 @@ pub fn convection_diffusion<T: Scalar>(
                         vals.push(T::from_real(-a));
                     }
                 } else {
-                    diag -= a; // |b_k|/h
+                    diag -= a;
                     if has_hi {
                         rows.push(p);
                         cols.push(hi);
@@ -319,6 +298,8 @@ pub fn convection_diffusion<T: Scalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matgen::integration::{sym_error, unsym_error};
+    use crate::test_constants::{fixed_refinement, gamma, solve_backward_error, U64, UC64};
     use crate::{LdltSymbolic, SolverSettings, ZeroPivotAction};
 
     fn cube(k: usize) -> [usize; 3] {
@@ -328,11 +309,8 @@ mod tests {
     #[test]
     fn curl_curl_is_complex_symmetric_indefinite_and_factors() {
         let a = curl_curl(&cube(8), 2.0, 0.3);
-        // Genuinely complex (the conductivity term).
         let max_im = a.values.iter().map(|v| v.im.abs()).fold(0.0, f64::max);
         assert!(max_im > 0.0, "curl-curl carries complex values");
-        // Factors via the preconditioner path (indefinite / near-singular curl-curl
-        // needs perturbation), then refines to a small residual.
         let sym = LdltSymbolic::analyze(&a, &SolverSettings::default()).unwrap();
         let opts = SolverSettings::default()
             .with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 });
@@ -345,18 +323,14 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(40))
             .unwrap()
             .0;
-        let mut ax = vec![Complex::new(0.0, 0.0); n];
-        a.symv(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).norm()).fold(0.0, f64::max)
-            / b.iter().map(|v| v.norm()).fold(0.0, f64::max).max(1e-30);
-        assert!(res < 1e-6, "curl-curl refined residual {res}");
+        let omega = sym_error(&a, &x, &b);
+        let bound = fixed_refinement(n, UC64) + gamma(n + 1, UC64);
+        assert!(omega <= bound, "curl-curl refined backward error {omega}");
     }
 
     #[test]
     fn saddle_point_is_symmetric_indefinite_and_factors() {
         let a = saddle_point::<f64>(&[10usize, 10], 0.1);
-        // The pressure block makes it indefinite: a plain Cholesky-style exact
-        // factor would hit a non-positive pivot; Bunch-Kaufman handles it.
         let sym = LdltSymbolic::analyze(&a, &SolverSettings::default()).unwrap();
         let opts = SolverSettings::default()
             .with_zero_pivot(ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 });
@@ -367,20 +341,18 @@ mod tests {
             .solve_refined(&a, &b, &crate::RefinePolicy::steps(40))
             .unwrap()
             .0;
-        let mut ax = vec![0.0; n];
-        a.symv(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max)
-            / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-30);
-        assert!(res < 1e-6, "saddle-point refined residual {res}");
+        let omega = sym_error(&a, &x, &b);
+        let bound = fixed_refinement(n, U64) + gamma(n + 1, U64);
+        assert!(
+            omega <= bound,
+            "saddle-point refined backward error {omega}"
+        );
     }
 
     #[test]
     fn convection_diffusion_is_unsymmetric_and_factors() {
         use crate::LuSymbolic;
-        // Advection-dominated (small eps), recirculating flow, upwind: a well-posed
-        // unsymmetric M-matrix that must factor through the LU path.
         let a = convection_diffusion::<f64>(&[20usize, 20], 0.01, Flow::Rotating, true);
-        // Unsymmetric by construction: find a transposed entry pair A[i,j] != A[j,i].
         let get = |i: usize, j: usize| -> f64 {
             let (s, e) = (a.col_ptr[j], a.col_ptr[j + 1]);
             a.row_idx[s..e]
@@ -393,22 +365,21 @@ mod tests {
         for j in 0..a.n {
             for k in a.col_ptr[j]..a.col_ptr[j + 1] {
                 let i = a.row_idx[k];
-                if i != j && (a.values[k] - get(j, i)).abs() > 1e-12 {
+                if i != j && a.values[k] != get(j, i) {
                     asymmetric = true;
                 }
             }
         }
         assert!(asymmetric, "convection-diffusion is unsymmetric");
-        // Factors and solves through the unsymmetric LU path.
         let sym = LuSymbolic::analyze(&a, &SolverSettings::default()).unwrap();
         let solver = sym.factor(&a, &SolverSettings::default()).unwrap();
         let n = a.n;
         let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
         let x = solver.solve(&b).unwrap();
-        let mut ax = vec![0.0; n];
-        a.matvec(&x, &mut ax);
-        let res = (0..n).map(|i| (ax[i] - b[i]).abs()).fold(0.0, f64::max)
-            / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-30);
-        assert!(res < 1e-8, "convection-diffusion LU residual {res}");
+        let omega = unsym_error(&a, &x, &b);
+        assert!(
+            omega <= solve_backward_error(n, U64),
+            "convection-diffusion LU backward error {omega}"
+        );
     }
 }

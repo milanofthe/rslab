@@ -19,13 +19,10 @@ use crate::parallel::{chunks_mut, Rayon, ScalarRates, Work};
 use crate::scalar::Scalar;
 use crate::sparse::layout::CscLayout;
 
-/// What an entry of a member's fill or of a term's product costs.
 static PASS_RATE: ScalarRates = ScalarRates::new(SCAN_NS_PER_ENTRY);
 
-/// The identity of the next pencil.
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-/// `(rows, cols)` of equal length, or an error naming `what`.
 fn pattern<'a>(
     what: &str,
     (rows, cols): (&'a [usize], &'a [usize]),
@@ -40,8 +37,6 @@ fn pattern<'a>(
     Ok((rows, cols))
 }
 
-/// The entries of `slots` sorted by slot, stably (entry order within a
-/// slot): the sorted slots and the entry of each.
 fn by_slot(slots: &[usize]) -> (Vec<usize>, Vec<usize>) {
     let mut entry: Vec<usize> = (0..slots.len()).collect();
     entry.sort_by_key(|&k| slots[k]);
@@ -58,20 +53,14 @@ fn by_slot(slots: &[usize]) -> (Vec<usize>, Vec<usize>) {
 #[derive(Debug)]
 pub struct Pencil {
     layout: CscLayout,
-    /// Unique per pencil, and the count of [`update`](Self::update)s: the
-    /// key of a member's values together with its `alpha` and `E`.
     id: u64,
     generation: u64,
     a0: Vec<f64>,
     a1: Vec<f64>,
-    /// `A0` summed per union slot.
     base: Vec<f64>,
-    /// The union slot of every `A1` entry, ascending, the entry of each
-    /// and its value.
     a1_slot: Vec<usize>,
     a1_entry: Vec<usize>,
     a1_sorted: Vec<f64>,
-    /// The union slot of every `E` entry, ascending, and the entry of each.
     extra_slot: Vec<usize>,
     extra_entry: Vec<usize>,
     a0_rows: EntryRows,
@@ -165,7 +154,6 @@ impl Pencil {
         self.extra_entry.len()
     }
 
-    /// The key of the current term values: the pencil and its generation.
     pub(crate) fn key(&self) -> (u64, u64) {
         (self.id, self.generation)
     }
@@ -214,8 +202,6 @@ impl Pencil {
 /// has the same bits on every thread count.
 #[derive(Clone, Debug)]
 pub struct EntryRows {
-    /// Row `r`'s entries are `start[r]..start[r + 1]`: the entry `entry[p]`
-    /// of the caller's order, in column `cols[p]`.
     start: Vec<usize>,
     entry: Vec<usize>,
     cols: Vec<usize>,
@@ -264,7 +250,6 @@ impl EntryRows {
         self.entry.len()
     }
 
-    /// `f(r, part)` over the rows in chunks, `part[0]` row `r`'s output.
     fn rows_into<T: Scalar>(&self, y: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
         let ops = (self.entry.len() + self.n()) as f64;
         let work = Work::of(ops, PASS_RATE.of::<T>());

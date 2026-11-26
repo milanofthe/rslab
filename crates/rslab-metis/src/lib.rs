@@ -21,12 +21,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-// Internal modules are `pub` (hidden) for tests and examples.
 #[doc(hidden)]
 #[allow(missing_docs)]
 pub mod coarsen;
-// The numbers nested dissection is tuned and defined by; reached by the
-// contract tests.
 #[doc(hidden)]
 pub mod constants;
 #[doc(hidden)]
@@ -69,8 +66,8 @@ pub struct MetisOptions {
     /// Switch from recursive ND to AMD on uncoarsened subproblems of
     /// at most this many vertices (METIS 5.2.0 default: 200).
     pub nd_to_amd_switch: u32,
-    /// Reduction-ratio threshold below which SHEM falls back to
-    /// 2-hop matching (METIS 5.2.0 default: 0.85).
+    /// SHEM falls back to 2-hop matching when the coarse graph keeps more
+    /// than this share of the fine vertices (METIS 5.2.0 default: 0.85).
     pub two_hop_ratio_threshold: f64,
     /// Maximum partition imbalance factor (`ufactor` in METIS terms,
     /// encoded as a fraction here). METIS 5.2.0 uses 200, which
@@ -227,11 +224,22 @@ pub fn metis_order_weighted(
 }
 
 #[cfg(test)]
+#[path = "../../rslab-amd/tests/common/patterns.rs"]
+mod patterns;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Graph;
+    use crate::patterns::grid_2d;
+
+    pub(crate) fn grid(m: usize, n: usize) -> Graph {
+        let (cp, ri) = grid_2d(m, n);
+        let pat = CscPattern::new(m * n, &cp, &ri).unwrap();
+        Graph::from_csc_pattern(&pat).unwrap()
+    }
 
     fn trivial_pattern() -> (Vec<i32>, Vec<i32>) {
-        // Diagonal n=3: col_ptr=[0,1,2,3], row_idx=[0,1,2]
         (vec![0, 1, 2, 3], vec![0, 1, 2])
     }
 
@@ -247,7 +255,6 @@ mod tests {
             seen[p as usize] = true;
         }
         assert!(seen.iter().all(|&s| s));
-        // time_us is populated; fill/flop remain None.
         assert!(ostats.fill_estimate.is_none());
         assert!(ostats.flop_estimate.is_none());
     }

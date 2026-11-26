@@ -18,29 +18,19 @@ use rslab_ordering_core::Progress;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Not decided yet whether nested dissection counts.
 const UNDECIDED: usize = usize::MAX;
 
-/// One part's progress over the candidates.
 pub(super) struct Part {
-    /// The node the events go to, entered on whichever thread reports.
     node: rsprobe::Handle,
-    /// The part's `progress!` site.
     emit: fn(u64),
     steps: Steps,
-    /// The candidates of the first stage: the leading slots.
     first: usize,
-    /// Per candidate (first stage, then the dissection seeds) its steps.
     slots: Vec<AtomicU64>,
-    /// Whether a dissection may follow the first stage.
     nd: bool,
-    /// The dissection seeds that count, once decided.
     seeds: AtomicUsize,
 }
 
 impl Part {
-    /// A part over `first` candidates and, where `nd`, the dissection with
-    /// up to `seeds` seeds; `None` where `active` is false.
     fn new(active: bool, emit: fn(u64), first: usize, nd: bool, seeds: usize) -> Option<Arc<Part>> {
         let total = (first + usize::from(nd)) as u64 * PROGRESS_STEPS;
         let steps = Steps::new(active, total)?;
@@ -55,8 +45,6 @@ impl Part {
         }))
     }
 
-    /// The callback of candidate `slot` (a dissection seed `i` is slot
-    /// `first + i`): `done` of `n` units.
     pub(super) fn slot(self: &Arc<Self>, slot: usize) -> Progress {
         let part = self.clone();
         Progress::new(move |done, n| {
@@ -66,13 +54,11 @@ impl Part {
         })
     }
 
-    /// The first stage has decided on `seeds` dissection seeds.
     pub(super) fn decide(&self, seeds: usize) {
         self.seeds.store(seeds, Ordering::Relaxed);
         self.update();
     }
 
-    /// The part is over: its last step, where not reached.
     pub(super) fn finish(&self) {
         if let Some(step) = self.steps.finish() {
             let _node = self.node.enter();
@@ -110,8 +96,6 @@ fn structure_event(step: u64) {
     rsprobe::progress!(step, PROGRESS_STEPS; "elimination tree");
 }
 
-/// The progress of the orderings and of the structures under them, each
-/// `None` where nothing records it.
 pub(super) struct Parts {
     pub ordering: Option<Arc<Part>>,
     pub structure: Option<Arc<Part>>,
@@ -169,7 +153,6 @@ impl Parts {
     }
 }
 
-/// The callbacks of one candidate: its ordering and its structure.
 #[derive(Default)]
 pub(super) struct Reports {
     pub ordering: Option<Progress>,

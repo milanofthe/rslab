@@ -20,10 +20,6 @@ use crate::common::{
 };
 use crate::krylov::{self, Operator};
 
-// ---------------------------------------------------------------------------
-// Scalar fields
-// ---------------------------------------------------------------------------
-
 /// A deflation-subspace carrier for :meth:`Ldlt.gmres` / :meth:`Lu.gmres` /
 /// :meth:`Klu.gmres` sweeps, created by ``handle.recycle(k)``.
 ///
@@ -133,7 +129,6 @@ pub trait Field: Scalar + Element + RecycleScalar + Default + Send + Sync + 'sta
     ) -> PyResult<LuAny>;
 }
 
-/// `factor_dtype` asked for a field this one cannot factor in.
 fn no_twin(dtype: &str, asked: &str, twin: Option<&str>) -> PyErr {
     let hint = match twin {
         Some(t) => format!("'{dtype}' or '{t}'"),
@@ -215,10 +210,6 @@ field!(f32, "float32", F32);
 field!(C64, "complex128", C64, C32, C64Mixed);
 field!(C32, "complex64", C32);
 
-// ---------------------------------------------------------------------------
-// The direct-solver interface the three core solvers share
-// ---------------------------------------------------------------------------
-
 pub trait Direct<T: Field>: Factorization<T> + Send + Sync + Sized {
     /// The matrix the solver factors: the default Krylov operator and the
     /// reference of the iterative refinement.
@@ -231,34 +222,23 @@ pub trait Direct<T: Field>: Factorization<T> + Send + Sync + Sized {
     }
 }
 
-impl<T: Field> Direct<T> for LdltSolver<T> {
-    type Matrix = CscMatrix<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
+macro_rules! direct {
+    ($solver:ident, $matrix:ident) => {
+        impl<T: Field> Direct<T> for $solver<T> {
+            type Matrix = $matrix<T>;
+            fn held_bytes(&self, a: &Self::Matrix) -> u64 {
+                self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
+            }
+        }
+    };
 }
-impl<T: Field> Direct<T> for LuSolver<T> {
-    type Matrix = GeneralCsc<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
-}
-impl<T: Field> Direct<T> for KluSolver<T> {
-    type Matrix = GeneralCsc<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
-}
+direct!(LdltSolver, CscMatrix);
+direct!(LuSolver, GeneralCsc);
+direct!(KluSolver, GeneralCsc);
 
 /// The automatic path's factor, holding (a share of) its analysis.
 pub type AutoFactor<T> = rslab::AutoSolver<'static, T>;
-
-impl<T: Field> Direct<T> for AutoFactor<T> {
-    type Matrix = GeneralCsc<T>;
-    fn held_bytes(&self, a: &Self::Matrix) -> u64 {
-        self.heap_bytes() + crate::common::csc_bytes(&a.col_ptr, &a.row_idx, &a.values)
-    }
-}
+direct!(AutoFactor, GeneralCsc);
 
 /// A factor in the lower-precision twin under a full-precision handle: the
 /// handle keeps the full-precision matrix, so refinement and the Krylov
@@ -290,7 +270,6 @@ pub struct Pair<T: Field, S: Direct<T>> {
     pub s: S,
     pub a: S::Matrix,
     _t: PhantomData<T>,
-    // Declared last, so dropped after the factor.
     _release: Release,
 }
 
@@ -340,8 +319,6 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         diagnostics_dict(py, &Factorization::<T>::diagnostics(&self.s))
     }
 
-    // The factor's own queries, resolved in `T` (a mixed-precision factor
-    // answers them for every field it could precondition).
     pub fn n(&self) -> usize {
         Factorization::<T>::n(&self.s)
     }
@@ -427,7 +404,6 @@ impl<T: Field, S: Direct<T>> Pair<T, S> {
         array2(py, &x, n, n)
     }
 
-    /// The Krylov operator: the factored matrix, or an explicit override.
     fn operator(&self, operator: Option<Operator<'_>>) -> PyResult<Option<GeneralCsc<T>>> {
         match operator {
             None => Ok(None),
@@ -585,10 +561,6 @@ impl<T: Field> Pair<T, AutoFactor<T>> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// The Python classes
-// ---------------------------------------------------------------------------
 
 /// Run `$body` with `$p` bound to the typed `Pair` inside a per-field enum.
 macro_rules! dispatch {

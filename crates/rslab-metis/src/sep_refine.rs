@@ -16,7 +16,6 @@ use crate::initial_partition::{PART_A, PART_B};
 use crate::rng::SplitMix;
 use crate::MetisOptions;
 
-/// Weight of `v`'s neighbors that carry label `s`.
 #[inline]
 fn far_weight(graph: &Graph, labels: &[u8], v: usize, s: usize) -> i64 {
     let mut w = 0i64;
@@ -29,7 +28,6 @@ fn far_weight(graph: &Graph, labels: &[u8], v: usize, s: usize) -> i64 {
     w
 }
 
-/// Total vertex weight per label class `[A, B, SEP]`.
 fn class_weights(graph: &Graph, labels: &[u8]) -> [i64; 3] {
     let mut w = [0i64; crate::constants::LABEL_CLASSES];
     for v in 0..graph.nvtxs as usize {
@@ -38,7 +36,6 @@ fn class_weights(graph: &Graph, labels: &[u8]) -> [i64; 3] {
     w
 }
 
-/// Gain of moving separator vertex `v` into side `into`.
 #[inline]
 fn gain(graph: &Graph, labels: &[u8], v: usize, into: usize) -> i64 {
     graph.vwgt[v] as i64 - far_weight(graph, labels, v, 1 - into)
@@ -46,10 +43,6 @@ fn gain(graph: &Graph, labels: &[u8], v: usize, into: usize) -> i64 {
 
 const NONE: u32 = u32::MAX;
 
-/// Indexed binary max-heap over vertices: `key` orders, the most recently
-/// pushed or updated vertex wins ties (the `tie` stamp; a touched vertex is
-/// handled next, which keeps the moves contiguous along the separator), and
-/// `pos` maps a vertex to its slot so keys update in place.
 pub(crate) struct GainHeap {
     heap: Vec<u32>,
     pos: Vec<u32>,
@@ -69,7 +62,6 @@ impl GainHeap {
         }
     }
 
-    /// Empty the heap (`O(len)`), keeping the allocations.
     pub fn clear(&mut self) {
         for &v in &self.heap {
             self.pos[v as usize] = NONE;
@@ -123,7 +115,6 @@ impl GainHeap {
         }
     }
 
-    /// Insert `v` (not in the heap) with `key`.
     pub fn push(&mut self, v: usize, key: i64) {
         debug_assert!(!self.contains(v));
         self.seq += 1;
@@ -134,8 +125,6 @@ impl GainHeap {
         self.sift_up(self.heap.len() - 1);
     }
 
-    /// Set the key of `v` (in the heap), stamp it as most recent, and restore
-    /// the heap order.
     pub fn update(&mut self, v: usize, key: i64) {
         let i = self.pos[v] as usize;
         let old = self.key[v];
@@ -149,13 +138,14 @@ impl GainHeap {
         }
     }
 
-    /// Remove and return the vertex with the largest key.
     pub fn pop(&mut self) -> Option<usize> {
-        let top = *self.heap.first()?;
-        let last = self.heap.pop().expect("non-empty");
+        let last = self.heap.pop()?;
+        let top = match self.heap.first_mut() {
+            Some(root) => std::mem::replace(root, last),
+            None => last,
+        };
         self.pos[top as usize] = NONE;
         if !self.heap.is_empty() {
-            self.heap[0] = last;
             self.pos[last as usize] = 0;
             self.sift_down(0);
         }
@@ -163,14 +153,12 @@ impl GainHeap {
     }
 }
 
-/// One label change, for the rollback journal.
 #[derive(Clone, Copy)]
 struct Transition {
     vertex: u32,
     old_label: u8,
 }
 
-/// Per-call scratch: the heap plus the move journal.
 pub(crate) struct Workspace {
     heap: GainHeap,
     journal: Vec<Transition>,
@@ -187,9 +175,6 @@ impl Workspace {
     }
 }
 
-/// Move separator vertex `v` into side `into`, pulling its far-side neighbors
-/// into the separator; keeps the heap keys of the affected separator vertices
-/// current. Returns the change of the separator weight.
 fn apply_move(
     graph: &Graph,
     labels: &mut [u8],
@@ -215,7 +200,6 @@ fn apply_move(
         if labels[u] != from_side as u8 {
             continue;
         }
-        // `u` joins the separator.
         let wu = graph.vwgt[u] as i64;
         ws.journal.push(Transition {
             vertex: u as u32,
@@ -226,8 +210,6 @@ fn apply_move(
         class_w[PART_SEP as usize] += wu;
         delta += wu;
         ws.heap.push(u, gain(graph, labels, u, into));
-        // Every separator neighbor of `u` lost `u` from its far side: its
-        // gain for moving into `into` grows by `w(u)`.
         for kk in graph.xadj[u] as usize..graph.xadj[u + 1] as usize {
             let t = graph.adjncy[kk] as usize;
             if t == u || labels[t] != PART_SEP {
@@ -235,10 +217,9 @@ fn apply_move(
             }
             if ws.heap.contains(t) {
                 let key = ws.heap.key[t] + wu;
+                debug_assert_eq!(key, gain(graph, labels, t, into));
                 ws.heap.update(t, key);
             } else {
-                // Dropped earlier as too heavy for the side cap; a fresh gain
-                // makes it a candidate again.
                 ws.heap.push(t, gain(graph, labels, t, into));
             }
         }
@@ -246,7 +227,6 @@ fn apply_move(
     delta
 }
 
-/// Roll the journal back to length `keep`, restoring labels and class weights.
 fn unwind(
     graph: &Graph,
     labels: &mut [u8],
@@ -254,8 +234,10 @@ fn unwind(
     ws: &mut Workspace,
     keep: usize,
 ) {
-    while ws.journal.len() > keep {
-        let t = ws.journal.pop().expect("journal non-empty");
+    if keep >= ws.journal.len() {
+        return;
+    }
+    for t in ws.journal.drain(keep..).rev() {
         let v = t.vertex as usize;
         let wv = graph.vwgt[v] as i64;
         class_w[labels[v] as usize] -= wv;
@@ -264,8 +246,6 @@ fn unwind(
     }
 }
 
-/// Seed the heap with every separator vertex's gain for moving into `into`,
-/// in a random order (the tie-break among equal gains, seed-deterministic).
 fn seed_heap(graph: &Graph, labels: &[u8], ws: &mut Workspace, rng: &mut SplitMix, into: usize) {
     ws.heap.clear();
     ws.order.clear();
@@ -278,8 +258,6 @@ fn seed_heap(graph: &Graph, labels: &[u8], ws: &mut Workspace, rng: &mut SplitMi
     }
 }
 
-/// One refinement pass moving separator vertices into side `into` while that
-/// side stays under `side_cap`. Returns the (best) separator weight reached.
 fn side_pass(
     graph: &Graph,
     labels: &mut [u8],
@@ -301,7 +279,7 @@ fn side_pass(
     while let Some(v) = ws.heap.pop() {
         debug_assert_eq!(labels[v], PART_SEP);
         if class_w[into] + graph.vwgt[v] as i64 > side_cap {
-            continue; // too heavy for the target side right now
+            continue;
         }
         sep_w += apply_move(graph, labels, &mut class_w, ws, v, into);
         if sep_w < best_w {
@@ -324,10 +302,6 @@ fn side_pass(
     best_w
 }
 
-/// Refine a node separator (labels `PART_A` / `PART_B` / `PART_SEP`) for up
-/// to `max_rounds` rounds of two side passes each, keeping either side under
-/// `(1 + max_imbalance) / 2` of the total weight. Returns the separator
-/// weight.
 pub(crate) fn refine_node_separator(
     graph: &Graph,
     labels: &mut [u8],
@@ -363,9 +337,6 @@ pub(crate) fn refine_node_separator(
     sep_w
 }
 
-/// Rebalance a projected separator whose sides differ by more than the
-/// tolerance: move separator vertices (best gain first) into the lighter
-/// side until the sides balance. Moves are kept, never rolled back.
 pub(crate) fn balance_node_separator(
     graph: &Graph,
     labels: &mut [u8],
@@ -423,56 +394,8 @@ mod tests {
     use crate::fm_refine::separator_weight;
     use crate::initial_partition::initial_bisect_ggp;
     use crate::separator::construct_separator;
-    use rslab_ordering_core::CscPattern;
-    use std::collections::BTreeSet;
+    use crate::tests::grid;
 
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
-
-    fn grid(m: usize, n: usize) -> Graph {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        let (cp, ri) = csc_from_triples(total, &t);
-        let pat = CscPattern::new(total, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
-    }
-
-    /// Build a valid trisection on a grid via GGP + Konig, then check
-    /// the refiner's invariants.
     fn refined_grid_case(m: usize, n: usize, seed: u64) -> (Graph, Vec<u8>, i64) {
         let g = grid(m, n);
         let total: i64 = g.vwgt.iter().map(|&w| w as i64).sum();
@@ -489,7 +412,6 @@ mod tests {
         for seed in [1u64, 7, 21, 33] {
             let (g, labels, _) = refined_grid_case(12, 12, seed);
             assert!(is_valid_trisection(&g, &labels), "seed {seed}");
-            // Returned weight must match a from-scratch recount.
             let mut labels2 = labels.clone();
             let mut rng = SplitMix::new(99);
             let w = refine_node_separator(&g, &mut labels2, &MetisOptions::default(), &mut rng);
@@ -508,8 +430,6 @@ mod tests {
 
     #[test]
     fn refine_finds_thin_separator_on_grid_band() {
-        // 8x8 grid with a fat 3-column separator band: columns 3,4,5
-        // SEP, cols 0-2 A, cols 6-7 B. Optimal is a single column (8).
         let g = grid(8, 8);
         let mut labels: Vec<u8> = (0..64u8)
             .map(|k| match k % 8 {
@@ -532,8 +452,6 @@ mod tests {
 
     #[test]
     fn balance_moves_toward_lighter_side() {
-        // Heavily imbalanced trisection on a 12x12 grid: col 1 = SEP,
-        // col 0 = A (12 vertices), cols 2.. = B (120 vertices).
         let g = grid(12, 12);
         let mut labels: Vec<u8> = (0..144u16)
             .map(|k| match k % 12 {

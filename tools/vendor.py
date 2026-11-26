@@ -44,7 +44,6 @@ def git(*args, cwd=ROOT):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True).stdout
 
 
-# One dependency line `name = { ..., git = "..", ... }`.
 GIT_DEP = re.compile(r"^(?P<name>[\w-]+)\s*=\s*\{(?P<body>[^}\n]*\bgit\s*=[^}\n]*)\}", re.M)
 
 
@@ -93,8 +92,7 @@ def vendor_git_dep(dest, name, url, rev):
     with tarfile.open(fileobj=io.BytesIO(tar)) as t:
         t.extractall(target, filter="data")
     crate = (target / "Cargo.toml").read_text(encoding="utf-8")
-    # Its dev-dependencies are not vendored, and a workspace of its own
-    # would be a second root inside the vendored tree.
+    # https://github.com/milanofthe/rslab/issues/292
     crate = re.sub(r"^\[(dev-dependencies|workspace)\]\n.*?(?=^\[|\Z)", "", crate, flags=re.M | re.S)
     deps = git_deps(section(crate, "dependencies"))
     crate = by_path(crate, [d[0] for d in deps], "..")

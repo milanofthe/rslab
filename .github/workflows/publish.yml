@@ -1,9 +1,5 @@
 name: publish
 
-# Build the RSLAB Python wheels with maturin across platforms and publish them
-# to PyPI via trusted publishing (OIDC, no API token). Runs on a version tag
-# (`v*`) or manual dispatch. The bindings live in `python/`.
-
 on:
   push:
     tags:
@@ -14,12 +10,9 @@ permissions:
   contents: read
 
 jobs:
-  # Version-consistency gate: the wheel version comes from python/Cargo.toml
-  # (maturin's single source of truth), NOT from the tag or the root crate.
-  # v0.21.0 shipped 0.20.0-named wheels because python/Cargo.toml was not
-  # bumped - PyPI then rejected the whole upload ("file already exists")
-  # after all six build jobs had run. Fail here, first and fast, instead.
+  # https://github.com/milanofthe/rslab/issues/292
   version-check:
+    name: version check (the wheel version is the one of python/Cargo.toml)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +49,7 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist
           sccache: "true"
-          # mimalloc v3 passes gcc flags the manylinux2014 cross compiler lacks.
+          # https://github.com/milanofthe/rslab/issues/292
           manylinux: "2_28"
           working-directory: python
       - uses: actions/upload-artifact@v4
@@ -127,9 +120,6 @@ jobs:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: [linux, windows, macos, sdist]
-    # Trusted publishing requires this environment and an OIDC token. Configure
-    # the `pypi` environment on PyPI's "trusted publisher" settings for the
-    # `rslab` project, pointing at this repo / `publish.yml` / environment.
     environment:
       name: pypi
       url: https://pypi.org/project/rslab/

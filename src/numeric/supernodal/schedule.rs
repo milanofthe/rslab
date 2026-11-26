@@ -2,9 +2,6 @@
 //! updater lists, and the consumer refcounts that free a panel after its
 //! last updater.
 
-/// Consumer refcounts (free a panel when its count reaches zero) and the
-/// per-supernode first elimination position - the shared head of both
-/// left-looking emit states.
 pub(crate) fn emit_refcount_offsets(
     sym: &crate::symbolic::SymbolicFactorization,
     sched: &LlSchedule,
@@ -26,32 +23,19 @@ pub(crate) fn emit_refcount_offsets(
     (refcount, e_offset)
 }
 
-/// Narrow index type of the left-looking streams (row structures, updater
-/// lists, the gloc scatter table): the supernodal sweeps are index-bound, and
-/// halving the index traffic was measured as a real win on the KLU path (the
-/// same lever, see the M3 audit). The row values are global column positions
-/// `< n` and the updater values supernode ids `< nsuper`; both fit u32 for
-/// every reachable problem size (an `n >= 2^32` factor would not fit any
-/// memory this library targets - asserted at schedule build).
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) type Li = u32;
 
-/// Pattern-only left-looking schedule, built once per symbolic analysis and
-/// shared by the LDLT/LU drivers and the a-priori memory estimators: the per-supernode
-/// row structures and the updater lists, both in flat CSR-like storage with
-/// narrow [`Li`] values.
 pub(crate) struct LlSchedule {
     rs_off: Vec<usize>,
     rs: Vec<Li>,
     ul_off: Vec<usize>,
     ul: Vec<Li>,
-    /// The assembly forest for the driver: each supernode's parent
-    /// (`usize::MAX` for a root) and the leaves, depth first from the roots.
     pub(crate) parent: Vec<usize>,
     pub(crate) leaves: Vec<usize>,
 }
 
 impl LlSchedule {
-    /// Heap bytes held by the row structures and the updater lists.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.rs_off)
@@ -83,15 +67,10 @@ impl LlSchedule {
             sym.n <= Li::MAX as usize,
             "left-looking schedule requires n < 2^32"
         );
-        // Row structures: own columns ++ sorted union of the column patterns'
-        // trailing rows and the children's off-diagonal rows. Column `j` of
-        // the permuted pattern is column `perm[j]` of the pattern, its rows
-        // mapped by `perm_inv`.
         let mut rs_off = Vec::with_capacity(nsuper + 1);
         rs_off.push(0usize);
         let mut rs: Vec<Li> = Vec::new();
         let mut trailing: Vec<Li> = Vec::new();
-        // Progress in columns, the supernodes' widths.
         let steps = crate::progress::Steps::new(rsprobe::active!(), sym.n as u64);
         for s in 0..nsuper {
             let snode = &sym.supernodes[s];
@@ -123,8 +102,6 @@ impl LlSchedule {
             rs_off.push(rs.len());
         }
 
-        // Updater lists: `k` updates `s` iff one of `k`'s off-diagonal rows is
-        // an eliminated column of `s`. Two counting passes over the flat rows.
         let mut col_to_snode = vec![0usize; sym.n];
         for (s, snode) in sym.supernodes.iter().enumerate() {
             col_to_snode[snode.first_col..snode.first_col + snode.ncol].fill(s);
@@ -165,8 +142,6 @@ impl LlSchedule {
     }
 }
 
-/// Parents (`usize::MAX` for a root) and leaves of the assembly forest, the
-/// leaves depth first from the roots.
 fn forest(sym: &crate::symbolic::SymbolicFactorization) -> (Vec<usize>, Vec<usize>) {
     let nodes = &sym.supernodes;
     let mut is_child = vec![false; nodes.len()];

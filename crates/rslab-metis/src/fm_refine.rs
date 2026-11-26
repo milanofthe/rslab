@@ -50,19 +50,7 @@ pub fn refine_bisection(
 
         let mut locked: Vec<bool> = vec![false; n];
         let mut heap: BinaryHeap<(i32, Reverse<i32>, i32)> = BinaryHeap::new();
-        // (gain, Reverse(vertex), stamp): stamp is the gain snapshot
-        // stored alongside the entry so stale entries can be skipped.
-        //
-        // NOTE: every vertex is seeded here, not just the current
-        // boundary. METIS seeds only boundary vertices and lazily
-        // re-inserts a vertex the first time a neighbour move makes it
-        // a boundary vertex, costing Omega(boundary) per pass rather than
-        // the Omega(n log n) below. Interior vertices have
-        // gain = -internal_degree <= 0, so they sit at the bottom of
-        // this max-heap and are only popped after the positive-gain
-        // boundary moves that actually reduce the cut. Seeding all n is
-        // a deliberate simplicity-over-speed trade at RSLAB's target
-        // sizes (<= 100k vertices, where FM rarely dominates runtime).
+        // https://github.com/milanofthe/rslab/issues/291
         for (v, &g) in gain.iter().enumerate().take(n) {
             heap.push((g, Reverse(v as i32), g));
         }
@@ -71,12 +59,8 @@ pub fn refine_bisection(
         let mut moves: Vec<i32> = Vec::new();
         let mut a_w = part_weight(graph, labels, PART_A);
         let mut b_w = total - a_w;
-        // If the pass starts imbalanced, best_prefix = None means
-        // "no balanced state seen yet" - rollback to prefix 0 would
-        // keep the imbalanced start, which defeats the purpose of
-        // FM on imbalanced input. The first balanced state the
-        // trajectory reaches is unconditionally recorded.
         let starts_balanced = a_w.max(b_w) <= max_side;
+        // https://github.com/milanofthe/rslab/issues/291
         let mut best_prefix: Option<usize> = if starts_balanced { Some(0) } else { None };
         let mut best_cut = pass_cut;
         let mut best_a_w = a_w;
@@ -89,10 +73,8 @@ pub fn refine_bisection(
                 continue;
             }
             if stamp != gain[vu] {
-                // Stale - re-push if we haven't moved it yet.
                 continue;
             }
-            // Tentatively move v to the other side.
             let from = labels[vu];
             let to = if from == PART_A { PART_B } else { PART_A };
             let (new_a_w, new_b_w) = if to == PART_A {
@@ -101,9 +83,6 @@ pub fn refine_bisection(
                 (a_w - graph.vwgt[vu] as i64, b_w + graph.vwgt[vu] as i64)
             };
             let side_max = new_a_w.max(new_b_w);
-            // Always allow the move so FM can climb out of poor local
-            // configurations, but only consider it for "best" if the
-            // resulting partition is balanced.
             labels[vu] = to;
             a_w = new_a_w;
             b_w = new_b_w;
@@ -111,7 +90,6 @@ pub fn refine_bisection(
             locked[vu] = true;
             moves.push(v);
 
-            // Update neighbor gains.
             let lo = graph.xadj[vu] as usize;
             let hi = graph.xadj[vu + 1] as usize;
             for k in lo..hi {
@@ -119,11 +97,6 @@ pub fn refine_bisection(
                 if locked[u] {
                     continue;
                 }
-                // gain = ed - id. If neighbour u shared v's old side
-                // (`from`): edge (u,v) was internal, now crosses ->
-                // u's ed +w, id -w -> delta gain = +2w. If u shares v's
-                // new side (`to`): edge was crossing, now internal
-                // -> delta gain = -2w.
                 let w = graph.wgt(k);
                 if labels[u] == from {
                     gain[u] += 2 * w;
@@ -134,9 +107,6 @@ pub fn refine_bisection(
             }
 
             if side_max <= max_side {
-                // Record as best iff (a) this is the first balanced
-                // state seen this pass, or (b) it improves on the
-                // previous best balanced cut.
                 let is_first_balanced = best_prefix.is_none();
                 if is_first_balanced || cur_cut < best_cut {
                     best_cut = cur_cut;
@@ -155,12 +125,6 @@ pub fn refine_bisection(
             }
         }
 
-        // Roll back moves after best_prefix. If the pass started
-        // imbalanced and never reached a balanced state, best_prefix
-        // is None - keep the full move sequence (labels at the
-        // post-last-move state) so the next pass starts from the
-        // closest-to-balance configuration FM found, rather than
-        // rolling all the way back to the imbalanced start.
         match best_prefix {
             Some(prefix) => {
                 for &v in moves.iter().skip(prefix) {
@@ -172,11 +136,12 @@ pub fn refine_bisection(
                 pass_cut = best_cut;
             }
             None => {
-                // Labels already at post-last-move state; keep them.
                 pass_cut = cur_cut;
             }
         }
-        let _ = (a_w, b_w); // kept for post-pass debug assertions
+        debug_assert_eq!(a_w, part_weight(graph, labels, PART_A));
+        debug_assert_eq!(b_w, total - a_w);
+        debug_assert_eq!(pass_cut, cut_size(graph, labels));
         if pass_cut == before_pass {
             break;
         }
@@ -184,7 +149,6 @@ pub fn refine_bisection(
     pass_cut
 }
 
-/// Compute per-vertex gain = (edges to other side) - (edges to own side).
 fn compute_gains(graph: &Graph, labels: &[u8], gain: &mut [i32]) {
     for (v, &lv) in labels.iter().enumerate() {
         let lo = graph.xadj[v] as usize;
@@ -219,76 +183,13 @@ pub fn separator_weight(graph: &Graph, labels: &[u8]) -> i64 {
 mod tests {
     use super::*;
     use crate::initial_partition::initial_bisect_ggp;
+    use crate::patterns::csc_from_triples;
     use crate::rng::SplitMix;
+    use crate::tests::grid;
     use rslab_ordering_core::CscPattern;
-    use std::collections::BTreeSet;
 
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
-
-    fn grid(m: usize, n: usize) -> Graph {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        let (cp, ri) = csc_from_triples(total, &t);
-        let pat = CscPattern::new(total, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
-    }
-
-    /// Regression test for the sign of the FM neighbour gain update.
-    ///
-    /// Flipped signs at the `gain[u] +/- 2w` neighbour update make
-    /// `cur_cut` drift into negative impossible territory on a graph
-    /// where FM actually has to move vertices, and FM then rolls every
-    /// move back. Tests that start from already-optimal cuts
-    /// (`initial_bisect_ggp` on a grid is at the optimum), let the
-    /// balance guard block every move, or only check permutation
-    /// validity cannot catch that.
-    ///
-    /// Two assertions matter here:
-    ///
-    /// 1. **I1 (bookkeeping consistency).** `returned_cut` must equal
-    ///    `cut_size(graph, labels)` recomputed from scratch. This is
-    ///    the assertion a sign error *cannot* survive.
-    /// 2. **Cut actually drops.** Path P_10 with alternating ABAB
-    ///    labels has cut = 9 and balanced optimum cut = 1. FM with
-    ///    correct bookkeeping must reduce the cut.
     #[test]
     fn fm_sign_invariant_on_alternating_path() {
-        // Path 0-1-...-9.
         let mut t = Vec::new();
         for i in 0..10 {
             t.push((i, i));
@@ -308,14 +209,11 @@ mod tests {
 
         let after = refine_bisection(&g, &mut labels, 0.20, 32);
 
-        // I1 - the assertion that catches a sign error directly.
         assert_eq!(
             after,
             cut_size(&g, &labels),
             "returned cut must equal cut_size(labels) recomputed from scratch"
         );
-        // Quality - FM must actually move at least one vertex on this
-        // adversarial input.
         assert!(
             after < before,
             "FM must reduce cut from {} on alternating P_10, got {}",
@@ -353,8 +251,6 @@ mod tests {
         let mut rng = SplitMix::new(9);
         let mut labels = initial_bisect_ggp(&g, &mut rng, total / 2);
         let returned = refine_bisection(&g, &mut labels, 0.20, 5);
-        // I1 (bookkeeping consistency): returned cut equals cut
-        // recomputed from labels.
         assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
         let a = part_weight(&g, &labels, PART_A);
         let b = part_weight(&g, &labels, PART_B);
@@ -365,11 +261,6 @@ mod tests {
 
     #[test]
     fn refine_bisection_bad_init_improves() {
-        // Start from an adversarial labeling (all on one side, one
-        // vertex on the other) - FM must rebalance. I2 (cut never
-        // grows) does not apply across the imbalanced -> balanced
-        // transition: the starting cut of 2 is achievable only
-        // because 15 vertices are on one side.
         let g = grid(4, 4);
         let mut labels = vec![PART_A; 16];
         labels[0] = PART_B;
@@ -392,7 +283,6 @@ mod tests {
     #[test]
     fn separator_weight_accounting() {
         let g = grid(3, 3);
-        // Set up an explicit separator: middle row is SEP.
         let labels: Vec<u8> = (0..9u8)
             .map(|k| {
                 let r = k / 3;
@@ -405,16 +295,6 @@ mod tests {
             .collect();
         assert_eq!(separator_weight(&g, &labels), 3);
     }
-
-    // Adversarial set A1-A10: standing regression tests enforcing
-    // I1 (bookkeeping consistency) and, where meaningful,
-    // I2 (cut never grows), I4 (balance respected at exit),
-    // I6 (determinism).
-    //
-    // A1 is covered by `fm_sign_invariant_on_alternating_path` above.
-    // A2-A10 follow. Each constructs `initial cut` and (where
-    // applicable) `optimum` by hand - never by running the solver
-    // under test.
 
     fn path(n: usize) -> Graph {
         let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
@@ -451,8 +331,6 @@ mod tests {
 
     #[test]
     fn a2_path_p20_alternating() {
-        // P_20 with alternating ABABAB...: every edge crosses -> cut 19.
-        // Optimum balanced cut is 1 (single middle edge).
         let g = path(20);
         let mut labels: Vec<u8> = (0..20u8)
             .map(|k| if k % 2 == 0 { PART_A } else { PART_B })
@@ -470,9 +348,6 @@ mod tests {
 
     #[test]
     fn a3_cycle_c12_alternating() {
-        // Even cycle C_12 with alternating labels: every edge crosses
-        // -> cut 12. Optimum balanced cut is 2 (two "cut points" on
-        // the cycle).
         let g = cycle(12);
         let mut labels: Vec<u8> = (0..12u8)
             .map(|k| if k % 2 == 0 { PART_A } else { PART_B })
@@ -490,8 +365,6 @@ mod tests {
 
     #[test]
     fn a4_grid_4x4_checkerboard() {
-        // 4x4 grid with checkerboard labels (r+c) mod 2: every edge
-        // crosses -> cut 24. Balanced optimum is 4 (one row/column).
         let g = grid(4, 4);
         let mut labels: Vec<u8> = (0..16u8)
             .map(|k| {
@@ -517,10 +390,6 @@ mod tests {
 
     #[test]
     fn a5_grid_6x6_mixed_boundary() {
-        // 6x6 grid with a mixed but deterministic label assignment
-        // (SplitMix-seeded). I1 and I2 are the load-bearing assertions;
-        // the exact optimum depends on the initial labeling so we only
-        // check cut never grows.
         let g = grid(6, 6);
         let mut rng = SplitMix::new(0xA5A5_A5A5);
         let mut labels: Vec<u8> = (0..36)
@@ -545,19 +414,6 @@ mod tests {
 
     #[test]
     fn a6_k44_unbalanced_init_rebalances() {
-        // K_{4,4}, labels = [A, B, B, B, B, B, B, B]. Structure is
-        // bipartite between {0..4} and {4..8}, so vertex 0 connects
-        // to 4,5,6,7 -> starting cut 4 with a=1, b=7.
-        //
-        // max_imbalance=0.50, total=8 -> max_side=6. The 1-7 start
-        // violates balance. Post-fix, refine_bisection treats an
-        // imbalanced pass-start as "no valid rollback target" via a
-        // None sentinel on best_prefix and unconditionally records
-        // the first balanced state the FM trajectory reaches.
-        //
-        // The I2 (cut never grows) property does not apply across
-        // the imbalanced->balanced transition: the starting cut of 4
-        // is cheap only because the partition is violating.
         let g = complete_bipartite(4, 4);
         let mut labels: Vec<u8> = vec![PART_B; 8];
         labels[0] = PART_A;
@@ -579,9 +435,6 @@ mod tests {
 
     #[test]
     fn a7_two_k4_bridge_no_spurious_moves() {
-        // Two K_4 blocks (0..4 and 4..8) joined by a single bridge
-        // edge (3,4). Labels: all A. Cut = 0 (bridge is internal).
-        // FM should not grow the cut; I2 is the gate.
         let n = 8;
         let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
         for i in 0..4 {
@@ -607,8 +460,6 @@ mod tests {
 
     #[test]
     fn a8_path_p10_all_a_empty_side() {
-        // P_10 with all A labels. Cut = 0. Degenerate empty B side -
-        // FM must not panic and must not grow the cut.
         let g = path(10);
         let mut labels = vec![PART_A; 10];
         assert_eq!(cut_size(&g, &labels), 0);
@@ -619,7 +470,6 @@ mod tests {
 
     #[test]
     fn a9_single_vertex_returns_zero() {
-        // n=1 - the n<2 short-circuit must fire.
         let cp: Vec<i32> = vec![0, 0];
         let ri: Vec<i32> = vec![];
         let pat = CscPattern::new(1, &cp, &ri).unwrap();
@@ -632,7 +482,6 @@ mod tests {
 
     #[test]
     fn a10_empty_edge_set_no_moves() {
-        // n=8, no edges, half A / half B. No gains -> no moves.
         let cp: Vec<i32> = vec![0; 9];
         let ri: Vec<i32> = vec![];
         let pat = CscPattern::new(8, &cp, &ri).unwrap();
@@ -644,7 +493,6 @@ mod tests {
         let returned = refine_bisection(&g, &mut labels, 0.20, 32);
         assert_eq!(returned, 0);
         assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
-        // I6 determinism: second run on fresh labels yields same result.
         let mut labels2: Vec<u8> = (0..8u8)
             .map(|k| if k < 4 { PART_A } else { PART_B })
             .collect();

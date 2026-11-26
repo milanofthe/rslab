@@ -1,12 +1,14 @@
 //! The determinant, the inverse and the dense constructors of the direct
 //! solvers against a dense LU with partial pivoting.
 
+pub mod common;
+
+use common::constants::{exp_of_logs, gamma, log_det_error, solve_backward_error, U64, UC64};
 use num_complex::Complex;
 use rslab::*;
 
 type C = Complex<f64>;
 
-/// A small deterministic generator, uniform in `[-1, 1)`.
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> f64 {
@@ -18,23 +20,23 @@ impl Lcg {
     }
 }
 
-/// The two fields the tests run over, built from a complex value (the
-/// real one takes its real part).
 trait Field: Scalar {
+    const U: f64;
     fn make(v: C) -> Self;
 }
 impl Field for f64 {
+    const U: f64 = U64;
     fn make(v: C) -> Self {
         v.re
     }
 }
 impl Field for C {
+    const U: f64 = UC64;
     fn make(v: C) -> Self {
         v
     }
 }
 
-/// A dense row-major matrix, entries scaled by `scale`; symmetric when asked.
 fn dense<T: Field>(n: usize, seed: u64, scale: f64, symmetric: bool) -> Vec<T> {
     let mut g = Lcg(seed);
     let mut a = vec![T::zero(); n * n];
@@ -57,8 +59,6 @@ fn to_c<T: Scalar>(v: T) -> C {
     C::new(v.real(), v.imag())
 }
 
-/// `(phase, log|det|)` of a dense row-major matrix by LU with partial
-/// pivoting, in complex arithmetic.
 fn reference_log_det<T: Scalar>(n: usize, a: &[T]) -> (C, f64) {
     let mut m: Vec<C> = a.iter().map(|&v| to_c(v)).collect();
     let (mut phase, mut log_abs) = (C::new(1.0, 0.0), 0.0);
@@ -86,12 +86,9 @@ fn reference_log_det<T: Scalar>(n: usize, a: &[T]) -> (C, f64) {
     (phase, log_abs)
 }
 
-/// `log|det|` and the phase to `1e-12` up to `n = 50`, growing with `n`
-/// beyond: the relative error of a determinant is `tr(A^-1 dA)` to first
-/// order, so two backward stable factorizations of a `300 x 300` matrix
-/// differ by a few `1e-12` (measured up to `4e-12`), the reference included.
 fn check_log_det<T: Scalar>(what: &str, n: usize, got: (T, f64), want: (C, f64)) {
-    let tol = (2e-14 * n as f64).max(1e-12);
+    let (tol_per_unknown, tol_floor) = (2e-14, 1e-12);
+    let tol = (tol_per_unknown * n as f64).max(tol_floor);
     let phase = to_c(got.0);
     assert!(
         (got.1 - want.1).abs() <= tol,
@@ -204,40 +201,59 @@ fn det_sign_of_a_real_symmetric_matrix_is_its_inertia() {
 
 #[test]
 fn small_determinants_are_exact_in_form() {
-    // det [[2, 1], [1, 3]] = 5, det [[0, 1], [1, 0]] = -1 (a row swap),
-    // det of a complex 1x1 is the entry.
+    let within = |err: f64, det: f64, n: usize, a_norm: f64, inverse_sum: f64, u: f64| {
+        let log_err = log_det_error(solve_backward_error(n, u), a_norm, inverse_sum);
+        err <= det.abs() * (log_err + exp_of_logs(det.abs().ln()) + u)
+    };
     let g = GeneralCsc::<f64>::from_dense_row_major(2, &[2.0, 1.0, 1.0, 3.0]).unwrap();
     let d = LuSolver::factor(&g, &SolverSettings::default())
         .unwrap()
         .det()
         .unwrap();
-    assert!((d - 5.0).abs() < 1e-14, "{d}");
+    assert!(
+        within((d - 5.0).abs(), 5.0, 2, 4.0, 7.0 / 5.0, U64),
+        "det [[2, 1], [1, 3]] is {d}, not 5"
+    );
     let p = GeneralCsc::<f64>::from_dense_row_major(2, &[0.0, 1.0, 1.0, 0.0]).unwrap();
     let d = KluSolver::factor(&p, &KluSettings::default())
         .unwrap()
         .det()
         .unwrap();
-    assert!((d + 1.0).abs() < 1e-14, "{d}");
+    assert!(
+        within((d + 1.0).abs(), 1.0, 2, 1.0, 2.0, U64),
+        "det of the row swap [[0, 1], [1, 0]] is {d}, not -1"
+    );
     let z = C::new(-3.0, 4.0);
     let g = GeneralCsc::from_dense_row_major(1, &[z]).unwrap();
     let d = LuSolver::factor(&g, &SolverSettings::default())
         .unwrap()
         .det()
         .unwrap();
-    assert!((d - z).norm() < 1e-14, "{d}");
+    assert!(
+        within(
+            (d - z).norm(),
+            z.norm(),
+            1,
+            z.norm(),
+            z.norm().recip(),
+            UC64
+        ),
+        "det of the complex 1x1 matrix [{z}] is {d}"
+    );
 }
 
 #[test]
 fn a_perturbed_factor_refuses_its_determinant() {
-    // A singular matrix: the floor lifts a pivot, the factor is of A + E.
-    let a = [1.0, 2.0, 2.0, 4.0];
-    let m = CscMatrix::<f64>::from_dense_row_major(2, &a).unwrap();
+    let singular = [1.0, 2.0, 2.0, 4.0];
+    let m = CscMatrix::<f64>::from_dense_row_major(2, &singular).unwrap();
     let f = LdltSolver::factor(&m, &SolverSettings::preconditioner(1e-8)).unwrap();
-    assert!(f.n_perturbed() > 0);
+    assert!(
+        f.n_perturbed() > 0,
+        "the floor lifts no pivot of the singular matrix"
+    );
     assert!(matches!(f.log_det(), Err(RslabError::InvalidInput(_))));
 }
 
-/// `max |A X - I|` and the 1-norm condition `||A||_1 ||X||_1`.
 fn inverse_error<T: Scalar>(n: usize, a: &[T], x: &[T]) -> (f64, f64) {
     let mut err = 0.0f64;
     for i in 0..n {
@@ -250,17 +266,17 @@ fn inverse_error<T: Scalar>(n: usize, a: &[T], x: &[T]) -> (f64, f64) {
             err = err.max(e.magnitude());
         }
     }
-    let norm1 = |m: &dyn Fn(usize, usize) -> T| {
-        (0..n)
-            .map(|j| (0..n).map(|i| m(i, j).magnitude()).sum::<f64>())
-            .fold(0.0, f64::max)
-    };
-    let cond = norm1(&|i, j| a[i * n + j]) * norm1(&|i, j| x[j * n + i]);
-    (err, cond)
+    let norm_inf = (0..n)
+        .map(|i| (0..n).map(|j| a[i * n + j].magnitude()).sum::<f64>())
+        .fold(0.0, f64::max);
+    let x_max = x.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
+    (err, norm_inf * x_max)
 }
 
 fn inverse_cases<T: Field>() {
     for (s, &n) in SIZES.iter().enumerate() {
+        let omega = solve_backward_error(n, T::U);
+        let per_scale = omega + gamma(n, T::U);
         let a = dense::<T>(n, 71 + s as u64, 1.0, false);
         let g = GeneralCsc::from_dense_row_major(n, &a).unwrap();
         for (name, x) in [
@@ -279,8 +295,11 @@ fn inverse_cases<T: Field>() {
                     .unwrap(),
             ),
         ] {
-            let (err, cond) = inverse_error(n, &a, &x);
-            assert!(err <= 1e-12 * cond, "{name} n={n}: {err:e} (cond {cond:e})");
+            let (err, scale) = inverse_error(n, &a, &x);
+            assert!(
+                err <= per_scale * scale + omega,
+                "{name} n={n}: {err:e} (scale {scale:e})"
+            );
         }
         let a = dense::<T>(n, 91 + s as u64, 1.0, true);
         let m = CscMatrix::from_dense_row_major(n, &a).unwrap();
@@ -288,8 +307,11 @@ fn inverse_cases<T: Field>() {
             .unwrap()
             .inverse()
             .unwrap();
-        let (err, cond) = inverse_error(n, &a, &x);
-        assert!(err <= 1e-12 * cond, "ldlt n={n}: {err:e} (cond {cond:e})");
+        let (err, scale) = inverse_error(n, &a, &x);
+        assert!(
+            err <= per_scale * scale + omega,
+            "ldlt n={n}: {err:e} (scale {scale:e})"
+        );
     }
 }
 
@@ -301,8 +323,6 @@ fn inverse_is_accurate_to_the_condition() {
 
 #[test]
 fn dense_constructors_give_the_sparse_factor() {
-    // A dense array with exact zeros: the pattern holds only the nonzeros,
-    // and the factor is the one of the same triplets, bitwise.
     let n = 40;
     let mut a = dense::<C>(n, 5, 1.0, false);
     let mut s = dense::<C>(n, 6, 1.0, true);
@@ -336,19 +356,29 @@ fn dense_constructors_give_the_sparse_factor() {
     }
     let gd = GeneralCsc::from_dense_row_major(n, &a).unwrap();
     let gt = GeneralCsc::from_triplets(n, &r, &c, &v).unwrap();
-    assert_eq!(gd.nnz(), r.len());
+    assert_eq!(
+        gd.nnz(),
+        r.len(),
+        "the dense constructor keeps an exact zero in the pattern"
+    );
     let b: Vec<C> = (0..n).map(|i| C::new(i as f64, 1.0)).collect();
     let opts = SolverSettings::default();
     assert_eq!(
         LuSolver::factor(&gd, &opts).unwrap().solve(&b).unwrap(),
-        LuSolver::factor(&gt, &opts).unwrap().solve(&b).unwrap()
+        LuSolver::factor(&gt, &opts).unwrap().solve(&b).unwrap(),
+        "LU of the dense constructor differs from LU of the same triplets"
     );
     let md = CscMatrix::from_dense_row_major(n, &s).unwrap();
     let mt = CscMatrix::from_triplets(n, &rs, &cs, &vs).unwrap();
-    assert_eq!(md.values.len(), rs.len());
+    assert_eq!(
+        md.values.len(),
+        rs.len(),
+        "the symmetric dense constructor keeps an exact zero in the pattern"
+    );
     assert_eq!(
         LdltSolver::factor(&md, &opts).unwrap().solve(&b).unwrap(),
-        LdltSolver::factor(&mt, &opts).unwrap().solve(&b).unwrap()
+        LdltSolver::factor(&mt, &opts).unwrap().solve(&b).unwrap(),
+        "LDLT of the dense constructor differs from LDLT of the same triplets"
     );
     assert!(GeneralCsc::<f64>::from_dense_row_major(3, &[1.0; 8]).is_err());
 }

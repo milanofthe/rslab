@@ -8,62 +8,47 @@ use crate::constants::{
 };
 use crate::parallel::{Rate, ScalarRates, Work};
 
-/// What a block's first factorization costs per input entry.
 pub(super) static FACTOR_RATE: ScalarRates = ScalarRates::new(KLU_FACTOR_NS_PER_ENTRY);
 
-/// What the parallel driver's splice costs per factor entry copied.
 static SPLICE_RATE: Rate = Rate::new(SCAN_NS_PER_ENTRY);
 
-/// Whether a block of `bn` columns whose elimination DAG has `nlev` levels
-/// gets a [`BlockPlan`] under `parallel`: one that can replay columns side
-/// by side. The plan and the memory plan decide alike.
 pub(super) fn planned(bn: usize, nlev: usize, parallel: KluParallel) -> bool {
     parallel != KluParallel::Off && bn >= 2 && nlev >= 2
 }
 
 impl BlockPlan {
-    /// Block `b` from column `bs` on, its columns' levels `level` (`nlev`
-    /// of them) and replay work `colw`: the columns grouped by level,
-    /// ascending within each, with the work of every level.
     fn new(b: usize, bs: usize, level: &[Ki], colw: &[u64], nlev: usize) -> Self {
-        let mut ptr = vec![0u32; nlev + 1];
+        let mut level_ptr = vec![0u32; nlev + 1];
         let mut level_work = vec![0u64; nlev];
         for (&l, &w) in level.iter().zip(colw) {
-            ptr[l as usize + 1] += 1;
+            level_ptr[l as usize + 1] += 1;
             level_work[l as usize] += w;
         }
         for l in 0..nlev {
-            ptr[l + 1] += ptr[l];
+            level_ptr[l + 1] += level_ptr[l];
         }
-        let mut fill = ptr.clone();
-        let mut cols = vec![0 as Ki; level.len()];
+        let mut fill = level_ptr.clone();
+        let mut level_cols = vec![0 as Ki; level.len()];
         for (k, &l) in level.iter().enumerate() {
-            cols[fill[l as usize] as usize] = (bs + k) as Ki;
+            level_cols[fill[l as usize] as usize] = (bs + k) as Ki;
             fill[l as usize] += 1;
         }
         let widest = (0..nlev)
-            .filter(|&l| ptr[l + 1] - ptr[l] >= 2)
+            .filter(|&l| level_ptr[l + 1] - level_ptr[l] >= 2)
             .map(|l| level_work[l])
             .max()
             .unwrap_or(0);
         BlockPlan {
-            b,
+            block: b,
             work: colw.iter().sum(),
             widest,
-            ptr,
-            cols,
+            level_ptr,
+            level_cols,
             level_work,
         }
     }
 }
 
-/// The replay plan of a factorization ([`ReplayPlan`]), computed once at
-/// factor time from the pivot-final pattern: per block its replay work
-/// `W_b = sum_j (COL_WORK + sum_{p in U(:,j)} |L(:,p)|)`, and for a block
-/// whose columns can replay side by side the levels of its elimination DAG
-/// with their work and the work of its longest dependency chain. Every
-/// refactor decides on it how its blocks replay, with the pool and the
-/// rates it finds.
 fn compute_replay_plan(
     block_ptr: &[usize],
     l_colptr: &[usize],
@@ -110,9 +95,6 @@ fn compute_replay_plan(
     plan
 }
 
-/// The columns of a factor array (`colptr`, `rowidx`, `val`) as a matrix with
-/// sorted rows, plus the diagonal entry `diag(j)` of each column `j` where
-/// there is one.
 pub(super) fn factor_csc<T: Scalar>(
     n: usize,
     colptr: &[usize],
@@ -144,14 +126,12 @@ pub(super) fn factor_csc<T: Scalar>(
     }
 }
 
-/// Row-max scaling reciprocals (1 for empty rows / scaling off).
 pub(super) fn row_scale_inv<T: Scalar>(a: &GeneralCsc<T>, enabled: bool) -> Vec<f64> {
     let mut rs = Vec::new();
     row_scale_inv_into(a, enabled, &mut rs);
     rs
 }
 
-/// [`row_scale_inv`] into `rs`, in its storage.
 pub(super) fn row_scale_inv_into<T: Scalar>(a: &GeneralCsc<T>, enabled: bool, rs: &mut Vec<f64>) {
     rs.clear();
     rs.resize(a.n, 0.0);
@@ -172,13 +152,7 @@ pub(super) fn row_scale_inv_into<T: Scalar>(a: &GeneralCsc<T>, enabled: bool, rs
     }
 }
 
-/// Per-block factor output in absolute position spaces: row indices of
-/// `l/u` are absolute final positions, `f_pre` holds absolute *pre-pivot*
-/// positions (rows of earlier blocks, resolved to final positions when the
-/// blocks are spliced in order), and `prog_in`/`f_k` carry the refactor
-/// scatter program contributions (see [`KluFactors`]).
 pub(super) struct BlockOut<T> {
-    /// Absolute final position for each local pre position (`len == bn`).
     fin_abs: Vec<Ki>,
     l_colptr: Vec<usize>,
     l_rowidx: Vec<Ki>,
@@ -190,14 +164,10 @@ pub(super) struct BlockOut<T> {
     f_colptr: Vec<usize>,
     f_pre: Vec<Ki>,
     f_val: Vec<T>,
-    /// Input-storage index `k` per F entry (aligned with `f_pre`/`f_val`).
     f_k: Vec<Ki>,
-    /// `(k, absolute final position)` for every within-block entry.
     prog_in: Vec<(Ki, Ki)>,
 }
 
-// Manual `Default` (the derive would demand `T: Default`, which `Scalar`
-// does not imply); every field is an empty `Vec`.
 impl<T> Default for BlockOut<T> {
     fn default() -> Self {
         Self {
@@ -219,12 +189,7 @@ impl<T> Default for BlockOut<T> {
 }
 
 impl<T: Scalar> BlockOut<T> {
-    /// Clear for a new block of size `bn` with `annz` input nonzeros,
-    /// keeping allocations (the sequential driver reuses one buffer across
-    /// all blocks; per-block buffers made the allocator dominate on the
-    /// tens-of-thousands-of-singletons circuit class). Reserves follow the
-    /// MNA reference class (~6x input fill, 4x reserve caps reallocation at
-    /// one doubling without over-committing on low-fill classes).
+    // https://github.com/milanofthe/rslab/issues/290
     fn reset(&mut self, bn: usize, annz: usize) {
         self.fin_abs.clear();
         self.fin_abs.resize(bn, KI_UNSET);
@@ -252,18 +217,10 @@ impl<T: Scalar> BlockOut<T> {
     }
 }
 
-/// Reusable per-worker scratch for [`factor_block`], sized once to the
-/// largest block (SuiteSparse KLU's workspace discipline). Real circuit
-/// matrices carry tens of thousands of tiny BTF blocks; allocating the DFS
-/// state per block makes the allocator the dominant factor cost there.
-///
-/// `x` relies on the kernel invariant that every scattered value is zeroed
-/// when consumed, so it is all-zero between blocks on the success path. A
-/// block that fails mid-column leaves `x` dirty, which is safe: the error
-/// aborts the whole factor, so no later block's output survives.
+// https://github.com/milanofthe/rslab/issues/290
 pub(super) struct KluScratch<T> {
     mark: Vec<[Ki; 2]>,
-    lpend: Vec<Ki>,
+    prune_end: Vec<Ki>,
     x: Vec<T>,
     node_stack: Vec<Ki>,
     cur_stack: Vec<usize>,
@@ -275,7 +232,7 @@ impl<T: Scalar> KluScratch<T> {
     fn new(max_bn: usize) -> Self {
         Self {
             mark: vec![[0, KI_UNSET]; max_bn],
-            lpend: vec![KI_UNSET; max_bn],
+            prune_end: vec![KI_UNSET; max_bn],
             x: vec![T::zero(); max_bn],
             node_stack: vec![0 as Ki; max_bn],
             cur_stack: vec![0usize; max_bn],
@@ -284,21 +241,12 @@ impl<T: Scalar> KluScratch<T> {
         }
     }
 
-    /// Reset the per-block state for a block of size `bn` (cheap memsets;
-    /// `x` is already zero by the kernel invariant, `topo`/`nonpiv` are
-    /// cleared per column).
     fn reset(&mut self, bn: usize) {
         self.mark[..bn].fill([0, KI_UNSET]);
-        self.lpend[..bn].fill(KI_UNSET);
+        self.prune_end[..bn].fill(KI_UNSET);
     }
 }
 
-/// Factor one diagonal block in block-local space. Strictly sequential and
-/// deterministic; the parallel driver runs one worker per block, which is
-/// bit-identical to the sequential order because blocks share no state.
-// The argument list mirrors the phase inputs (symbolic, matrix, settings,
-// scaling, permutation, block range, workspaces); a bundling struct would
-// only rename the same nine things.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn factor_block<T: Scalar>(
     sym: &KluSymbolic,
@@ -314,9 +262,6 @@ pub(super) fn factor_block<T: Scalar>(
     let bn = be - bs;
 
     if bn == 1 {
-        // Singleton block: the pivot is the (structurally nonzero) diagonal
-        // entry itself; everything else in the column is off-block. Cleared
-        // by hand (not `reset`) to skip its fill reserves.
         let c = sym.col_perm[bs];
         out.reset(1, 0);
         out.fin_abs[0] = bs as Ki;
@@ -346,41 +291,20 @@ pub(super) fn factor_block<T: Scalar>(
         return Ok(());
     }
 
-    // General irreducible block: left-looking Gilbert-Peierls, block-local
-    // position space (`lb = pre - bs`), DFS state borrowed from the reusable
-    // per-worker scratch.
-    // `mark[lb] = [dfs_stamp, local_final_position]` packed pair; the DFS
-    // touches both fields per visited node, packing halves its random
-    // cache-line traffic.
-    // `lpend`: symmetric pruning (Eisenstat & Liu, SIMAX 1992): once column
-    // `s` has a symmetric pivot pair (`U(s,k) != 0` and `L(k,s) != 0`), the
-    // DFS only needs the prefix of `L(:,s)` holding rows already pivotal at
-    // step `k`; every pruned row is covered through column `k`'s pattern.
-    // `lpend[s]` is the exclusive prefix end (KI_UNSET = unpruned).
     scratch.reset(bn);
-    // Slice borrows (not `&mut Vec`) so the hot loops index through one
-    // level of indirection, exactly like the previous per-block locals.
     let mark = scratch.mark.as_mut_slice();
-    let lpend = scratch.lpend.as_mut_slice();
+    // https://doi.org/10.1137/0613017
+    let prune_end = scratch.prune_end.as_mut_slice();
     let x = scratch.x.as_mut_slice();
     let node_stack = scratch.node_stack.as_mut_slice();
     let cur_stack = scratch.cur_stack.as_mut_slice();
     let topo = &mut scratch.topo;
     let nonpiv = &mut scratch.nonpiv;
-    // Diagonal tracking through off-diagonal pivots (SuiteSparse KLU's
-    // repair): `diag_row[lk]` is the block-local row currently assigned as
-    // column `lk`'s diagonal candidate, `diag_col[lr]` its inverse. When a
-    // pivot steals another column's diagonal row, the displaced row is
-    // reassigned to that column, so the zero-free matching survives and one
-    // off-diagonal pivot cannot cascade into unpivoted diagonals (and fill
-    // blow-up) for the rest of the block. Materialized lazily on the first
-    // off-diagonal pivot; until then both maps are the identity.
+    // https://doi.org/10.1145/1824801.1824814
+    // https://github.com/milanofthe/rslab/issues/290
     let mut diag_row: Vec<Ki> = Vec::new();
     let mut diag_col: Vec<Ki> = Vec::new();
 
-    // Reserve from the block's input nnz: the MNA reference class fills
-    // ~6x its input, so 4x reserves cap reallocation at one doubling in the
-    // common case without over-committing memory on low-fill classes.
     let annz: usize = (bs..be)
         .map(|j| {
             let c = sym.col_perm[j];
@@ -388,24 +312,16 @@ pub(super) fn factor_block<T: Scalar>(
         })
         .sum();
     out.reset(bn, annz);
-    // `fin_local[lb]` tracked inside `mark[lb][1]`; `out.fin_abs` filled at
-    // the end from it.
 
     for lj in 0..bn {
         let j = bs + lj;
         let c = sym.col_perm[j];
-        let sj = (lj + 1) as Ki; // unique DFS stamp for this column
+        let stamp = (lj + 1) as Ki;
         topo.clear();
         nonpiv.clear();
 
-        // Pass 1, symbolic: DFS the reach of the column's within-block
-        // pattern over the L columns factored so far. Pivotal nodes come
-        // out in `topo` post-order; non-pivotal nodes (pivot candidates)
-        // in `nonpiv`. The inner loop runs unchecked: every index is a
-        // block-local position `< bn` (`debug_assert`ed), and `cur/end` are
-        // positions into the already-built prefix of `l_rowidx`.
-        let col_end = |p: usize, lpend: &[Ki], l_colptr: &[usize]| -> usize {
-            let lp = lpend[p];
+        let col_end = |p: usize, prune_end: &[Ki], l_colptr: &[usize]| -> usize {
+            let lp = prune_end[p];
             if lp == KI_UNSET {
                 l_colptr[p + 1]
             } else {
@@ -415,17 +331,17 @@ pub(super) fn factor_block<T: Scalar>(
         for k in a.col_ptr[c]..a.col_ptr[c + 1] {
             let pre = pinv_pre[a.row_idx[k]] as usize;
             if pre < bs {
-                continue; // off-block, handled in pass 2
+                continue;
             }
             if pre >= be {
                 return Err(pattern_mismatch());
             }
             let lb = pre - bs;
             let m = mark[lb];
-            if m[0] == sj {
+            if m[0] == stamp {
                 continue;
             }
-            mark[lb][0] = sj;
+            mark[lb][0] = stamp;
             if m[1] == KI_UNSET {
                 nonpiv.push(lb as Ki);
                 continue;
@@ -433,7 +349,7 @@ pub(super) fn factor_block<T: Scalar>(
             let mut d = 0usize;
             node_stack[0] = lb as Ki;
             cur_stack[0] = out.l_colptr[m[1] as usize];
-            let mut end = col_end(m[1] as usize, lpend, &out.l_colptr);
+            let mut end = col_end(m[1] as usize, prune_end, &out.l_colptr);
             loop {
                 let mut descended = false;
                 while cur_stack[d] < end {
@@ -442,10 +358,10 @@ pub(super) fn factor_block<T: Scalar>(
                     cur_stack[d] += 1;
                     debug_assert!(ch < bn);
                     let mch = unsafe { *mark.get_unchecked(ch) };
-                    if mch[0] == sj {
+                    if mch[0] == stamp {
                         continue;
                     }
-                    unsafe { mark.get_unchecked_mut(ch)[0] = sj };
+                    unsafe { mark.get_unchecked_mut(ch)[0] = stamp };
                     if mch[1] == KI_UNSET {
                         nonpiv.push(ch as Ki);
                         continue;
@@ -454,7 +370,7 @@ pub(super) fn factor_block<T: Scalar>(
                     node_stack[d] = ch as Ki;
                     let p = mch[1] as usize;
                     cur_stack[d] = out.l_colptr[p];
-                    end = col_end(p, lpend, &out.l_colptr);
+                    end = col_end(p, prune_end, &out.l_colptr);
                     descended = true;
                     break;
                 }
@@ -467,13 +383,10 @@ pub(super) fn factor_block<T: Scalar>(
                 }
                 d -= 1;
                 let up = mark[node_stack[d] as usize][1] as usize;
-                end = col_end(up, lpend, &out.l_colptr);
+                end = col_end(up, prune_end, &out.l_colptr);
             }
         }
 
-        // Pass 2, scatter the scaled column values (off-block entries go
-        // straight to F with their pre positions; final positions are
-        // resolved when the earlier blocks are spliced).
         for k in a.col_ptr[c]..a.col_ptr[c + 1] {
             let r = a.row_idx[k];
             let pre = pinv_pre[r] as usize;
@@ -484,21 +397,12 @@ pub(super) fn factor_block<T: Scalar>(
                 out.f_k.push(k as Ki);
             } else {
                 x[pre - bs] = sv;
-                // Refactor scatter program, local target for now; translated
-                // to the absolute final position once the block's pivot
-                // sequence is complete (saves a second full matrix scan).
                 out.prog_in.push((k as Ki, (pre - bs) as Ki));
             }
         }
 
         let u_start = out.u_rowidx.len();
 
-        // Pass 3, numeric update in topological order (reverse post-order):
-        // each pivotal node's final value feeds its L column into the
-        // remaining work vector, and becomes a U entry. The axpy runs
-        // through `fmadd` (FMA on native builds); `refactor`'s replay uses
-        // the identical expression so it stays bit-identical. Unchecked: all
-        // row indices are local positions `< bn` by construction.
         for &u in topo.iter().rev() {
             let u = u as usize;
             let p = mark[u][1];
@@ -512,6 +416,7 @@ pub(super) fn factor_block<T: Scalar>(
                 debug_assert!(k < out.l_rowidx.len());
                 let lr = unsafe { *out.l_rowidx.get_unchecked(k) } as usize;
                 debug_assert!(lr < bn);
+                // https://github.com/milanofthe/rslab/issues/290
                 unsafe {
                     *x.get_unchecked_mut(lr) =
                         fmadd(nxu, *out.l_val.get_unchecked(k), *x.get_unchecked(lr));
@@ -519,8 +424,6 @@ pub(super) fn factor_block<T: Scalar>(
             }
         }
 
-        // Pivot: max-magnitude candidate, overridden by the diagonal
-        // (local pre position `lj`) when it clears the threshold.
         let mut piv = UNSET;
         let mut maxmag = 0.0f64;
         for &np in nonpiv.iter() {
@@ -538,23 +441,20 @@ pub(super) fn factor_block<T: Scalar>(
         } else {
             diag_row[lj] as usize
         };
-        if mark[d][0] == sj && mark[d][1] == KI_UNSET {
+        if mark[d][0] == stamp && mark[d][1] == KI_UNSET {
             let dm = x[d].magnitude();
             if dm > 0.0 && dm >= settings.pivot_threshold * maxmag {
                 piv = d;
             }
         }
         if piv != d {
-            // Off-diagonal pivot: hand the displaced diagonal row `d` to the
-            // (necessarily unprocessed) column that had `piv` as its
-            // diagonal. Processed columns' assigned rows are always pivotal,
-            // so `d` is free and the reassigned matching stays zero-free.
             if diag_row.is_empty() {
                 diag_row = (0..bn as Ki).collect();
                 diag_col = (0..bn as Ki).collect();
             }
             debug_assert!(mark[d][1] == KI_UNSET);
             let k2 = diag_col[piv];
+            debug_assert!(k2 == KI_UNSET || k2 as usize > lj);
             if k2 != KI_UNSET {
                 diag_row[k2 as usize] = d as Ki;
                 diag_col[d] = k2;
@@ -566,13 +466,12 @@ pub(super) fn factor_block<T: Scalar>(
         x[piv] = T::zero();
         mark[piv][1] = lj as Ki;
         out.udiag.push(dval);
+        // https://github.com/milanofthe/rslab/issues/290
         for &np in nonpiv.iter() {
             let np = np as usize;
             if np == piv {
                 continue;
             }
-            // Keep structural zeros: the pattern must be value-independent
-            // for the refactor replay.
             out.l_rowidx.push(np as Ki);
             out.l_val.push(x[np] / dval);
             x[np] = T::zero();
@@ -581,14 +480,10 @@ pub(super) fn factor_block<T: Scalar>(
         out.u_colptr.push(out.u_rowidx.len());
         out.f_colptr.push(out.f_pre.len());
 
-        // Symmetric pruning for this pivot: for each U-partner column `s`
-        // (an entry `U(s,j)`), if `L(:,s)` contains the pivot row, partition
-        // it so rows already pivotal come first and bound the future DFS
-        // scans to that prefix.
         let pivk = piv as Ki;
         for ui in u_start..out.u_rowidx.len() {
             let s = out.u_rowidx[ui] as usize;
-            if lpend[s] != KI_UNSET {
+            if prune_end[s] != KI_UNSET {
                 continue;
             }
             let (cs, ce) = (out.l_colptr[s], out.l_colptr[s + 1]);
@@ -604,14 +499,10 @@ pub(super) fn factor_block<T: Scalar>(
                     head += 1;
                 }
             }
-            lpend[s] = head as Ki;
+            prune_end[s] = head as Ki;
         }
     }
 
-    // Block fully pivoted: resolve to absolute final positions. L row
-    // indices go local-pre -> absolute final; U row indices go local-final
-    // -> absolute final; the scatter program records absolute finals for
-    // every within-block entry.
     for m in mark[..bn].iter() {
         debug_assert_ne!(m[1], KI_UNSET);
     }
@@ -624,6 +515,7 @@ pub(super) fn factor_block<T: Scalar>(
     for ri in out.u_rowidx.iter_mut() {
         *ri += bs as Ki;
     }
+    // https://github.com/milanofthe/rslab/issues/290
     for e in out.prog_in.iter_mut() {
         e.1 = out.fin_abs[e.1 as usize];
     }
@@ -658,29 +550,14 @@ pub(super) fn factor_impl<T: Scalar>(
         pinv_pre[r] = k as Ki;
     }
 
-    // Factor the diagonal blocks: independent by construction, so the
-    // parallel driver is bit-identical to the sequential one (each worker is
-    // sequential inside; nothing is shared across blocks). It runs on the
-    // current workers ([`crate::parallel`]): those of `settings.threads`,
-    // whose pool `KluSymbolic::factor` entered where the blocks go wide.
     let nblocks = sym.block_ptr.len() - 1;
-    // The first factor decides on the blocks' input entries, the work it
-    // knows before the pivot-final pattern; a refactor on the exact replay
-    // work ([`compute_replay_plan`]) once the pattern is frozen.
     let parallel = sym.parallel_blocks::<T>(settings);
     let max_bn = sym.max_block_size();
     let rate = FACTOR_RATE.of::<T>();
     let entries = sym.nnz as f64;
-    // The parallel driver decides on the rate ([`crate::parallel`]). `On`
-    // goes as wide as the pool.
     let forced = settings.parallel == KluParallel::On;
     let side = parallel;
 
-    // Numeric output buffers, filled either incrementally block-by-block
-    // (sequential: one reused scratch + one reused block buffer, no
-    // per-block allocations and no separate splice pass - the allocator and
-    // the extra copy dominated on the tens-of-thousands-of-tiny-blocks
-    // circuit class) or by the two-phase parallel splice below.
     let mut l_colptr: Vec<usize> = Vec::with_capacity(n + 1);
     l_colptr.push(0);
     let mut u_colptr: Vec<usize> = Vec::with_capacity(n + 1);
@@ -698,14 +575,8 @@ pub(super) fn factor_impl<T: Scalar>(
     let mut scatter_target = vec![0 as Ki; sym.nnz];
     let mut fin_of_pre = vec![0 as Ki; n];
 
+    // https://github.com/milanofthe/rslab/issues/290
     if !side {
-        // Same fill heuristics as the per-block reserves (MNA class ~6x
-        // input): caps the doubling-growth copies of the append at one.
-        // (The parallel branch replaces these vectors with exact-size
-        // allocations instead, so the reserves live here.) A single block
-        // (one irreducible matrix, the common case for a logic circuit) is
-        // moved out of the block buffer instead of copied, so nothing is
-        // reserved for it.
         if nblocks > 1 {
             l_rowidx.reserve(sym.nnz * KLU_L_RESERVE);
             l_val.reserve(sym.nnz * KLU_L_RESERVE);
@@ -731,8 +602,6 @@ pub(super) fn factor_impl<T: Scalar>(
                 &mut scratch,
                 &mut out,
             )?;
-            // Incremental append: F rows reference earlier blocks only,
-            // whose final positions are already in `fin_of_pre`.
             fin_of_pre[bs..be].copy_from_slice(&out.fin_abs);
             let (lo, uo, fo) = (l_rowidx.len(), u_rowidx.len(), f_rowidx.len());
             if nblocks == 1 {
@@ -765,6 +634,7 @@ pub(super) fn factor_impl<T: Scalar>(
             }
         }
     } else {
+        // https://github.com/milanofthe/rslab/issues/290
         let blocks: Vec<Result<BlockOut<T>, RslabError>> =
             crate::parallel::map_init::<crate::parallel::Rayon, _, _>(
                 nblocks,
@@ -792,12 +662,6 @@ pub(super) fn factor_impl<T: Scalar>(
                 },
             );
 
-        // Splice the per-block outputs. Two phases: exact-size global arrays are
-        // carved into disjoint per-block chunks (offsets by prefix sums) and the
-        // heavy value/index copies run per block, in parallel when enabled; the
-        // cheap O(n)/O(nnz) bookkeeping (column pointers, the refactor scatter
-        // program, `udiag`) stays sequential. Off-block F rows are resolved
-        // through `fin_of_pre`, which is complete before the copy phase starts.
         let outs: Vec<BlockOut<T>> = {
             let mut v = Vec::with_capacity(nblocks);
             for o in blocks {
@@ -916,8 +780,6 @@ pub(super) fn factor_impl<T: Scalar>(
         .max()
         .unwrap_or(0);
 
-    // The exact replay work from the now-frozen pattern, which every
-    // refactor decides its parallel replay on ([`compute_replay_plan`]).
     let plan = compute_replay_plan(&sym.block_ptr, &l_colptr, &u_colptr, &u_rowidx, settings);
 
     Ok(KluFactors {
@@ -931,7 +793,6 @@ pub(super) fn factor_impl<T: Scalar>(
         col_perm: sym.col_perm.clone(),
         rs_inv,
         scaled: settings.row_scaling,
-        parallel,
         l_colptr,
         l_rowidx,
         l_val,

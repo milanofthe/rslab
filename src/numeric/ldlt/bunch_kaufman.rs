@@ -18,7 +18,6 @@ use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
 use std::sync::atomic::Ordering;
 
-/// One running [`ll_cdiv_emit`]'s buffers (see there).
 pub(super) struct BkScratch<T> {
     d: Vec<T>,
     d_subdiag: Vec<T>,
@@ -77,15 +76,10 @@ impl<T> Default for BkScratch<T> {
     }
 }
 
-/// The scratch pools of one LDL^T factorization: the panel kernel's buffers
-/// per running node, the deep-row replay's per row chunk, and the `cmod`
-/// update's (`D` times a column, `D` times a block, the product) per node
-/// or column slab.
 pub(super) struct BkPools<T> {
     pub(super) node: ScratchPool<BkScratch<T>>,
     pub(super) w: ScratchPool<Vec<T>>,
     pub(super) cmod: ScratchPool<(Vec<T>, Vec<T>, Vec<T>)>,
-    /// The buffers of the emit's [`finish_panel`](crate::numeric::supernodal::panel::finish_panel).
     pub(super) finish: ScratchPool<crate::numeric::supernodal::panel::PanelScratch<T>>,
 }
 
@@ -108,39 +102,12 @@ impl<T> BkPools<T> {
     }
 }
 
-/// `v` as `len` copies of `x`, in its storage.
 fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
     v.clear();
     v.resize(len, x);
 }
 
-/// Apply a factored Bunch-Kaufman panel's transform sequence to rows
-/// `[r0, r1)` of the panel `base` (laid out as `lay`; the rows all in its
-/// diagonal part or all in its off-block rectangle), for pivot steps
-/// `[kb, ke)`. Bit-identical to the corresponding rows of the full-height
-/// panel factorization: per 1x1 step the in-panel updates use the **final**
-/// column-`k` multipliers (`w_j*d^-1` is exactly the stored `L(j,k)`), then
-/// the column is scaled by `d^-1`; per 2x2 step the multiplier pair is
-/// rebuilt from the (already perturbed) stored `D` block with the same
-/// expressions and order. Deep rows are never pivot candidates, so each
-/// caller's row range is independent - the lever that lifts the dominant
-/// `O((nrow-ke)*pw^2)` panel work off the serial getf2 path onto all idle
-/// workers (ports the LU twin's `apply_panel_trailing` to Bunch-Kaufman).
-///
-/// `deep_swaps[k - kb]` records the pivot interchange partner of step `k`
-/// (`usize::MAX` when the step did not interchange): getf2 bounds its swaps
-/// to the panel rows, so the deep-row segments of each interchange are
-/// replayed here, immediately before the step's transform - the original
-/// full-height order, row by row.
-///
-/// `mult_snap` holds the in-panel multipliers **as of each step's time**
-/// (`mult_snap[(k - kb)*nb + (j - kb)]` is step `k`'s coefficient for
-/// in-panel row `j`). Reading them from the final panel would be wrong:
-/// later symmetric interchanges permute the rows of earlier multiplier
-/// columns (unlike LU, where produced pivot rows never move again).
-///
-/// SAFETY: `[r0, r1)` must be this caller's exclusive rows of the panel
-/// `base`, at or below row `ke`.
+// https://github.com/milanofthe/rslab/issues/288
 #[allow(clippy::too_many_arguments)]
 unsafe fn apply_bk_panel_trailing<T: Scalar>(
     base: *mut T,
@@ -158,27 +125,13 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
     sb: usize,
     w: &mut Vec<T>,
 ) {
-    // Blocked form of the per-pivot sweep. Pivots are taken in sub-blocks of
-    // `sb` columns ([`KernelSettings::trailing_block`](crate::KernelSettings::trailing_block);
-    // 16 measured best: 32 doubles the scalar within-block work, 8 halves
-    // the GEMM efficiency): inside a sub-block a pivot's rank-1 (rank-2)
-    // update reaches only the sub-block's remaining columns (scalar loops),
-    // while its contribution to the columns beyond the sub-block is deferred
-    // and applied as one GEMM `B[:, ke2..ke] -= W * M` per sub-block, where
-    // `W` holds the pivot columns before their `D^{-1}` scaling and `M` the
-    // multipliers of `mult_snap`. A pivot swap that reaches beyond the
-    // sub-block first flushes the pending pivots (the swapped-in column must
-    // carry every earlier update, as it does in the sequential sweep). Rows
-    // are independent, so any row range gives the same values.
     let deep = r1.saturating_sub(r0);
     if deep == 0 || ke <= kb {
         return;
     }
     debug_assert!(r1 <= lay.w || r0 >= lay.w, "rows in one part of the panel");
-    // Column `j`'s entry of row `r0`; its rows follow it.
+    debug_assert!(r0 >= ke, "deep rows only");
     let col = |j: usize| base.add(lay.at(r0, j));
-    // One spare column: a 2x2 pivot that starts on a sub-block's last
-    // column extends the sub-block by one, the pair is never split.
     let sb = sb.max(1);
     reset(w, deep * (sb + 1), T::zero());
     let mut kb2 = kb;
@@ -187,17 +140,29 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
         if ke2 < ke && two_by_two[ke2 - 1] {
             ke2 += 1;
         }
-        // Pending pivots [pend0, k) whose deferred update has not been applied.
-        let mut pend0 = kb2;
+        debug_assert!(ke2 - kb2 <= sb + 1);
+        let mut first_pending = kb2;
         let mut k = kb2;
         while k < ke2 {
             let kp = deep_swaps[k - kb];
             if kp != usize::MAX {
                 if kp >= ke2 {
                     flush_trailing(
-                        base, lay, kb, ke, kb2, ke2, pend0, k, w, deep, mult_snap, nb, r0,
+                        base,
+                        lay,
+                        kb,
+                        ke,
+                        kb2,
+                        ke2,
+                        first_pending,
+                        k,
+                        w,
+                        deep,
+                        mult_snap,
+                        nb,
+                        r0,
                     );
-                    pend0 = k;
+                    first_pending = k;
                 }
                 let src = if two_by_two[k] { k + 1 } else { k };
                 let (ca, cb) = (col(src), col(kp));
@@ -253,20 +218,24 @@ unsafe fn apply_bk_panel_trailing<T: Scalar>(
             }
         }
         flush_trailing(
-            base, lay, kb, ke, kb2, ke2, pend0, ke2, w, deep, mult_snap, nb, r0,
+            base,
+            lay,
+            kb,
+            ke,
+            kb2,
+            ke2,
+            first_pending,
+            ke2,
+            w,
+            deep,
+            mult_snap,
+            nb,
+            r0,
         );
         kb2 = ke2;
     }
 }
 
-/// Apply the deferred updates of pivots `[p0, p1)` of the sub-block
-/// `[kb2, ke2)` (their unscaled columns in `w`, indexed from `kb2`) to the
-/// columns `[ke2, ke)` of rows `r0..r0 + deep`:
-/// `B[:, ke2..ke] -= W[:, p0..p1] * M[p0..p1, ke2..ke]`.
-///
-/// # Safety
-/// `base` is the panel laid out as `lay`; the row range is this task's own,
-/// in one part of the panel.
 #[allow(clippy::too_many_arguments)]
 unsafe fn flush_trailing<T: Scalar>(
     base: *mut T,
@@ -289,15 +258,11 @@ unsafe fn flush_trailing<T: Scalar>(
         return;
     }
     let lhs = w.as_ptr().add((p0 - kb2) * deep);
-    // The direct kernel, not the backend entry: these products are skinny
-    // (k = trailing_block), where the complex split's plane copies cost more
-    // than they save (measured: 1.84 s against 1.98 s single-core). One per
-    // run of the columns `[ke2, ke)` of uniform stride.
     for run in lay.runs(r0..r0 + deep, ke2..ke) {
-        // M rows p0..p1, the run's columns: row-major with stride `nb`.
         let rhs = mult_snap
             .as_ptr()
             .add((p0 - kb) * nb + (run.cols.start - kb));
+        // https://github.com/milanofthe/rslab/issues/288
         gemm::gemm(
             deep,
             run.cols.len(),
@@ -322,18 +287,7 @@ unsafe fn flush_trailing<T: Scalar>(
     }
 }
 
-/// One blocked Bunch-Kaufman panel step of the left-looking cdiv over the
-/// fully-summed columns `[kb, ke)`: the in-panel getf2 (rows `< ke`) plus the
-/// row-parallel deep replay. Touches ONLY panel columns `[kb, ke)` (their full
-/// height), which is what makes the cdiv panel lookahead sound: the
-/// step for panel `p+1` may run concurrently with the wide part of panel
-/// `p`'s deferred Schur update (columns `>= ke2`), the two column ranges are
-/// disjoint. Pushes each pivot floor, `(column of the node, what the floor
-/// added to the diagonal)`, to `floors`.
-///
-/// # Safety
-/// `base` is the panel laid out as `lay`, of `nrow` rows; nobody else
-/// touches its columns `[kb, ke)` meanwhile.
+// https://github.com/milanofthe/rslab/issues/288
 #[allow(clippy::too_many_arguments)]
 unsafe fn ll_bk_panel_step<T: Scalar>(
     base: *mut T,
@@ -357,21 +311,13 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
     wpool: &ScratchPool<Vec<T>>,
     floors: &mut Vec<(usize, T)>,
 ) -> Result<(), RslabError> {
-    // getf2: unblocked Bunch-Kaufman over the panel columns [kb, ke), with
-    // EVERYTHING bounded to the panel rows `< ke`: pivot candidates,
-    // rank-1/rank-2 updates, interchanges. The deep rows `[ke, nrow)` -
-    // the dominant `O((nrow-ke)*pw^2)` share on tall panels - are lifted
-    // off this serial path into the parallel `apply_bk_panel_trailing`
-    // below (bit-identical replay; ports the LU twin's lever).
     for ds in deep_swaps.iter_mut() {
         *ds = usize::MAX;
     }
-    // Entry `(i, j)`, on or below the diagonal.
     let a = |i: usize, j: usize| base.add(lay.at(i, j));
     let mut k = kb;
     while k < ke {
         let absakk = (*a(k, k)).magnitude();
-        // colmax over the in-panel candidate rows (k+1)..ke.
         let mut colmax_sq = 0.0;
         let mut imax = k;
         for i in (k + 1)..ke {
@@ -395,7 +341,6 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
             kstep = 1;
             kp = k;
         } else {
-            // rowmax in row `imax`, restricted to the panel.
             let mut rowmax_sq = 0.0;
             for j in k..imax {
                 let m = (*a(imax, j)).magnitude_sq();
@@ -443,9 +388,6 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
             }
             d[k] = dk;
             let dinv = dk.recip();
-            // Update the in-panel trailing columns (k+1)..ke over the
-            // panel rows, then scale column k's panel rows (deep rows
-            // replayed in the parallel apply).
             let ck = a(k, k);
             for j in (k + 1)..ke {
                 let wj_dinv = *ck.add(j - k) * dinv;
@@ -477,14 +419,9 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
                 Some(floor) => {
                     let fl = (floor * floor).max(growth_floor);
                     if det.magnitude() < fl {
-                        // Lift both diagonal entries in steps of `step` until
-                        // the block clears the floor, so the stored block is
-                        // the exact block of the matrix plus the lift: the
-                        // determinant is a monic quadratic in the lift whose
-                        // roots, when it is still below the floor at one
-                        // step, lie within a few steps of zero.
                         let step = floor.max(scale * GROWTH_EPS.sqrt());
                         let mut lift = step;
+                        // https://github.com/milanofthe/rslab/issues/288
                         while ((d11 + T::from_real(lift)) * (d22 + T::from_real(lift)) - d21 * d21)
                             .magnitude()
                             < fl
@@ -533,16 +470,9 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
             k += 2;
         }
     }
-    // Deep rows [ke, nrow): replay this panel's interchanges + pivot
-    // transforms row-parallel (bit-identical to the old full-height
-    // getf2 - same per-row op sequence). This is the dominant panel
-    // work on tall supernodes; it now runs on all idle workers instead
-    // of the serial getf2 path.
     if nrow > ke {
         let deep = nrow - ke;
         let pw = ke - kb;
-        // The deep rows in chunks within one part of the panel each: its
-        // diagonal part's rows past the step, then the off-block rows.
         let parts = [(ke, lay.w.max(ke)), (lay.w.max(ke), nrow)];
         let replay = |r0: usize, r1: usize, w: &mut Vec<T>| {
             // SAFETY: disjoint row chunk; see `apply_bk_panel_trailing`.
@@ -604,11 +534,6 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
                 },
             );
         } else {
-            // Row chunks that keep a chunk of every panel column in L1 across
-            // the whole pivot sweep (the sweep streams each column once per
-            // pivot; unchunked, a deep panel is re-read from L2 `pw` times).
-            // Rows are independent, so every row's arithmetic is unchanged:
-            // bit-identical to one call over all rows.
             let mut w = wpool.take();
             for &(p0, p1) in &parts {
                 if p1 > p0 {
@@ -621,14 +546,6 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
     Ok(())
 }
 
-/// Heap bytes [`ll_cdiv_emit`] allocates for an `nrow x ncol` panel besides
-/// what it keeps in the node's slot (`D`, the 2x2 flags and the row
-/// permutation): the pivot and multiplier scratch, the deferred update's
-/// blocks as they grow panel by panel, the deep-row replay's sub-block
-/// buffers and the Schur tiles' diagonal blocks on up to `workers` threads
-/// at once; and the largest split planes its Schur GEMMs take on a worker
-/// (complex fields) and how many workers may take them at once. Replays the
-/// kernel's panel loop, for the memory plan.
 pub(super) fn ll_cdiv_scratch<T: Scalar>(
     ncol: usize,
     nrow: usize,
@@ -639,8 +556,6 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
     use crate::memory::grown;
     let par_cdiv = k.cdiv_par(nrow, ncol);
     let nb = k.panel_width(k.panel_nb, ncol);
-    // A node narrower than a panel is one panel: its scratch (the `nb x nb`
-    // multiplier snapshots) sized to its width, the same blocking.
     let nb = nb.min(ncol.max(1));
     let (mut l21, mut diag, mut planes, mut copies) = (0, 0, 0, 1);
     let mut kb = 0;
@@ -670,9 +585,6 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
         }
         kb = ke;
     }
-    // l1, l2 and their lookahead twins, both multiplier snapshots, `l21buf`
-    // and `gbuf`, the replay's sub-blocks over all deep rows and the tiles'
-    // diagonal blocks.
     let entries = crate::constants::BK_ROW_BUFFERS * nrow
         + 2 * nb * nb
         + 2 * l21
@@ -682,12 +594,6 @@ pub(super) fn ll_cdiv_scratch<T: Scalar>(
     (bytes as u64, planes, copies)
 }
 
-/// cdiv + store + emit for supernode `s` on an already fully cmod-updated
-/// `panel` - the tail of [`ll_factor_node`], extracted so the spine
-/// pipeline executor can drive assembly/cmod itself and reuse
-/// the identical factor kernel. Takes `panel` and the global->local scratch
-/// `gloc` by value (`gloc` is returned to the thread-local scratch slot on
-/// every exit path).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ll_cdiv_emit<T: Scalar>(
     s: usize,
@@ -702,48 +608,13 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     let snode = &sym.supernodes[s];
     let ncol = snode.ncol;
     let nrow = sched.rows(s).len();
-    // cdiv: partial **blocked** Bunch-Kaufman LDL^T (1x1 and 2x2 pivots), the
-    // rectangular `nrow x ncol` analogue of `factor_front`'s panel kernel. The
-    // fully-summed columns are factored in panels of width `NB` with pivoting
-    // **bounded to the panel** (candidate rows `(k+1)..ke`), then each panel's
-    // trailing update - the remaining panel columns `[ke, ncol)` over all rows
-    // `[ke, nrow)` - is deferred to one SIMD GEMM (the BLAS-3 bulk, replacing the
-    // scalar rank-1/rank-2 sweeps that dominated wide separators). Unlike
-    // `factor_front` there is **no `A22` block** (the panel has no columns beyond
-    // `ncol`; that Schur update is the ancestors' `cmod`), so the trailing region
-    // is the rectangular `(nrow-ke) x (ncol-ke)` lower part. Pivoting stays inside
-    // `0..ncol`, so the off-diagonal rows `[ncol, nrow)` keep their identity and
-    // `s`'s contribution to ancestors is unaffected by this internal permutation.
-    //
-    // Adaptive panel width: wide separators get double-width panels - the
-    // deferred Schur GEMM's inner dimension is `nb`, and k = 64 is too thin
-    // to reach peak on root-class panels (measured ~79 Gflop/s-eq). The
-    // extra serial getf2 work is O(nb^3) per panel - negligible against the
-    // GEMM gain at this size. The global nb sweep said 128 loses overall
-    // because SMALL panels pay; widening only from `wide_panel_min_ncol` (a
-    // pure function of the node, thread-count independent) keeps them at
-    // default.
     let nb = kt.k.panel_width(kt.k.panel_nb, ncol);
-    // A node narrower than a panel is one panel: its scratch (the `nb x nb`
-    // multiplier snapshots) sized to its width, the same blocking.
     let nb = nb.min(ncol.max(1));
-    // Same join-steal guard as cmod: a small node must not fork inside its
-    // cdiv (deep-row apply / deferred Schur GEMM) - the blocked join steals
-    // foreign subtree work and stalls this node's dependents. Total cdiv
-    // work ~ nrow*ncol^2 (panel + trailing updates).
     let ll_cdiv_par = kt.k.cdiv_par(nrow, ncol);
     let alpha = bk_alpha();
     let lay = Layout::new(ncol, nrow - ncol);
     debug_assert!(panel.len() >= lay.len());
     let base = LdltPanelPtr(panel.as_mut_ptr());
-    // The node's buffers, on loan from the factorization's pool and reset
-    // to the values they start from: the pivot outputs (`D`, the 2x2 flags,
-    // the row permutation; read back through the emit cells), the 2x2
-    // multiplier scratch (only `[k+2, nrow)` is read each step), the
-    // deferred-GEMM buffers, the per-step interchange partners
-    // (`usize::MAX` = none) and the time-of-step multipliers (`nb x nb`,
-    // column = step) the deep-row replay consumes, and the same set again
-    // for the lookahead's next-panel step.
     let mut lent = pools.node.take();
     let BkScratch {
         d,
@@ -781,10 +652,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     for v in [&mut *l21buf, &mut *gbuf] {
         v.clear();
     }
-    // The node's pivot floors, `(column of the node, what the floor added)`.
     let mut floors: Vec<(usize, T)> = Vec::new();
-    // The high-water mark of columns already factored ahead by the lookahead
-    // join.
     let mut done_through = 0usize;
     let mut kb = 0;
     while kb < ncol {
@@ -818,14 +686,9 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
             };
             r?;
         }
-        // Deferred panel trailing update: panel[ke.., ke..ncol] -= L21*D*R^T, where
-        // L21 = panel rows [ke,nrow) x panel cols [kb,ke) (mtxpw), G = L21*D (block-
-        // diagonal D), and R = the first `cw` rows of L21 (the rows that are
-        // themselves remaining panel columns [ke,ncol)); only the lower part
-        // (rows `>= ` the column) is updated.
         let pw = ke - kb;
-        let cw = ncol - ke; // remaining fully-summed columns to update
-        let mt = nrow - ke; // trailing rows (left-factor height)
+        let cw = ncol - ke;
+        let mt = nrow - ke;
         if pw > 0 && cw > 0 && mt > 0 {
             l21buf.clear();
             l21buf.resize(mt * pw, T::zero());
@@ -859,12 +722,6 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                     cc += 1;
                 }
             }
-            // The trailing columns in tiles straight into the panel
-            // (`schur_tiles`), on the pool where the update is parallel work:
-            // narrow tiles that spread over the workers there, else the
-            // Schur tile. Both gates are pure functions of the node shape, so
-            // the tiles, and therefore the bits, are deterministic per
-            // matrix; `ll_thread_determinism` holds.
             let par = mt * cw * pw >= ll_cdiv_par;
             let tiles = if par {
                 (PANEL_BLOCK, PANEL_BLOCK)
@@ -876,6 +733,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 // SAFETY: the trailing rows of the columns in `range`, the
                 // caller's own; `gbuf` and `l21buf` hold `mt * pw`.
                 unsafe {
+                    // https://github.com/milanofthe/rslab/issues/288
                     schur_tiles(
                         base.get(),
                         lay,
@@ -892,9 +750,6 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                     )
                 }
             };
-            // Panel lookahead: the next panel's columns [ke, ke2) first, then
-            // factor the next panel concurrently with the update of the rest
-            // ([ke2, ncol)) - the two touch disjoint column ranges.
             let ke2 = (ke + nb).min(ncol);
             let cw_n = ke2 - ke;
             let wide = cw - cw_n;
@@ -960,9 +815,6 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
         let mut all = emit.floors.lock().unwrap_or_else(|e| e.into_inner());
         all.extend(floors.into_iter().map(|(k, delta)| (eoff + k, delta)));
     }
-    // Populate the O(n) emit maps + inertia for `s` (block-aware over its 1x1/2x2
-    // Bunch-Kaufman D), mirroring the legacy pass-1 emit. The `e`-numbering is one
-    // position per column, so `e_offset[s] + p` is column `p`'s elimination index.
     let (mut ipos, mut ineg, mut izero) = (0usize, 0usize, 0usize);
     let mut pp = 0;
     while pp < ncol {
@@ -1028,21 +880,12 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
     Ok(())
 }
 
-/// The Bunch-Kaufman pivot threshold `alpha = (1 + sqrt17)/8 ~ 0.6404`.
+// https://doi.org/10.1090/S0025-5718-1977-0428694-0
 #[inline]
 pub(crate) fn bk_alpha() -> f64 {
     (1.0 + 17.0_f64.sqrt()) / 8.0
 }
 
-/// Symmetric interchange of rows and columns `p < q` in the lower triangle
-/// of the panel `base` (laid out as `lay`), with the below-`q`
-/// column-segment swap bounded to rows `< row_limit`. The blocked Bunch-Kaufman panel kernels keep their pivot
-/// interchanges inside the panel rows and replay the deep-row segments later
-/// in the parallel trailing apply (`apply_bk_panel_trailing`), so the
-/// interchange sequence reaches every row exactly once, in step order.
-///
-/// # Safety
-/// `base` is the panel laid out as `lay`, `row_limit <= lay.w`.
 pub(crate) unsafe fn swap_sym_lower_bounded<T: Scalar>(
     base: *mut T,
     lay: Layout,
@@ -1052,17 +895,13 @@ pub(crate) unsafe fn swap_sym_lower_bounded<T: Scalar>(
 ) {
     debug_assert!(p < q && q < lay.w && q < row_limit && row_limit <= lay.w);
     let a = |i: usize, j: usize| base.add(lay.at(i, j));
-    // Column segment strictly below q: (i, p) <-> (i, q) for i > q.
     for i in (q + 1)..row_limit {
         std::ptr::swap(a(i, p), a(i, q));
     }
-    // Middle cross strip: (i, p) <-> (q, i) for p < i < q.
     for i in (p + 1)..q {
         std::ptr::swap(a(i, p), a(q, i));
     }
-    // Diagonal: (p, p) <-> (q, q).
     std::ptr::swap(a(p, p), a(q, q));
-    // Left row segments: (p, j) <-> (q, j) for j < p.
     for j in 0..p {
         std::ptr::swap(a(p, j), a(q, j));
     }

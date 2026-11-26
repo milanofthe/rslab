@@ -31,7 +31,6 @@ CLASSES = [("fem_", "FEM, curl-curl (rapidfem)"), ("sane_", "power grid (SANE)")
            ("mom_", "MoM near field"), ("ss_", "circuit, KLU path (SuiteSparse)")]
 METRICS = [("factor", "factor"), ("refactor", "refactor (new values)"), ("solve", "solve"),
            ("oneshot", "one-shot (analysis + factor + solve)")]
-# The share card of the breakdown: one or two systems per class, small to large.
 CARD_SYSTEMS = ["fem_iris_filter_f00", "fem_microstrip_line_f00", "fem_patch_antenna_f00",
                 "sane_ibmpg2_dc", "mom_xformer_D350", "mom_opamp_c350n"]
 STAGES = [("analyze", "analysis", st.DARKGRAY), ("scale", "scaling", st.AMBER),
@@ -102,8 +101,6 @@ def breakdown(data, ax, names):
     for yi, s in enumerate(names):
         ref = med(data[s]["pardiso"], "oneshot")
         rs = data[s]["rslab"]
-        # Stage times come from the last run (revisions that report them; else the
-        # factor call whole); scale them to the median factor call.
         stages = rs["report"].get("stages") or {"factor": 1.0}
         in_factor = sum(stages.get(k, 0.0) for k in ("scale", "factor", "solve-layout")) or 1.0
         f = med(rs, "factor") / in_factor
@@ -179,7 +176,7 @@ def main():
     st.setup()
     OUT.mkdir(parents=True, exist_ok=True)
 
-    names = [s for s in ordered(data) if not s.startswith("ss_")]  # KLU reports no stages
+    names = [s for s in ordered(data) if not s.startswith("ss_")]
     for subset, size, out in ((names, (8.0, 0.84 * len(names) + 1.2), None),
                               ([s for s in CARD_SYSTEMS if s in data], (9.0, 5.2), "social")):
         fig, ax = plt.subplots(figsize=size)

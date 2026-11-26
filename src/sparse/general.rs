@@ -117,7 +117,7 @@ impl<T: Scalar> GeneralCsc<T> {
         let mut next = col_ptr[..n].to_vec();
         for j in 0..n {
             for k in self.col_ptr[j]..self.col_ptr[j + 1] {
-                let i = self.row_idx[k]; // entry (i, j) -> transpose column i, row j
+                let i = self.row_idx[k];
                 let pos = next[i];
                 next[i] += 1;
                 row_idx[pos] = j;
@@ -157,9 +157,6 @@ impl<T: Scalar> GeneralCsc<T> {
                 "GeneralCsc: row_idx/values length mismatch".to_string(),
             ));
         }
-        // col_ptr must start at 0: a monotone col_ptr beginning at k > 0 with
-        // col_ptr[n] == nnz would silently drop positions 0..k from every
-        // column range (the X6 failure mode).
         if *self.col_ptr.first().unwrap_or(&0) != 0 {
             return Err(RslabError::InvalidInput(format!(
                 "GeneralCsc: col_ptr[0] must be 0, got {}",
@@ -171,8 +168,6 @@ impl<T: Scalar> GeneralCsc<T> {
                 "GeneralCsc: col_ptr[n] != nnz".to_string(),
             ));
         }
-        // Monotone col_ptr: a non-monotone pointer whose endpoints line up
-        // makes column ranges empty/overlapping and silently drops entries.
         for j in 0..self.n {
             if self.col_ptr[j + 1] < self.col_ptr[j] {
                 return Err(RslabError::InvalidInput(format!(
@@ -192,7 +187,6 @@ impl<T: Scalar> GeneralCsc<T> {
                         self.row_idx[k], j
                     )));
                 }
-                // Strictly increasing rows: sorted AND duplicate-free.
                 if k > start && self.row_idx[k] <= self.row_idx[k - 1] {
                     return Err(RslabError::InvalidInput(format!(
                         "GeneralCsc: row indices not strictly increasing in column {} \
@@ -227,8 +221,6 @@ mod tests {
         assert!(canonical().validate().is_ok());
     }
 
-    /// X6 parity with `CscMatrix::validate`: a col_ptr that does not start at
-    /// 0 silently drops the uncovered prefix entries from every column range.
     #[test]
     fn validate_rejects_nonzero_col_ptr_start() {
         let m = GeneralCsc::<f64> {
@@ -241,8 +233,6 @@ mod tests {
         assert!(msg.contains("col_ptr[0]"), "got: {msg}");
     }
 
-    /// X6 parity: a non-monotone col_ptr with matching endpoints makes column
-    /// ranges empty/overlapping and factors the wrong matrix.
     #[test]
     fn validate_rejects_non_monotone_col_ptr() {
         let m = GeneralCsc::<f64> {
@@ -255,9 +245,6 @@ mod tests {
         assert!(msg.contains("monoton"), "got: {msg}");
     }
 
-    /// Duplicates are the correctness-critical case: the KLU scatter assigns
-    /// (`x[pre] = v`) while `matvec` sums, so a duplicate row silently
-    /// produces a wrong factor. `validate` must reject it.
     #[test]
     fn validate_rejects_duplicate_rows() {
         let m = GeneralCsc::<f64> {

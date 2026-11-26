@@ -10,7 +10,6 @@
 
 use rslab_metis::{metis_order_full, CscPattern, MetisOptions};
 
-/// 7-point grid pattern, full symmetric, diagonal included.
 fn grid3d_pattern(m: usize) -> (usize, Vec<i32>, Vec<i32>) {
     let idx = |x: usize, y: usize, z: usize| ((z * m + y) * m + x) as i32;
     let n = m * m * m;
@@ -47,17 +46,15 @@ fn grid3d_pattern(m: usize) -> (usize, Vec<i32>, Vec<i32>) {
     (n, col_ptr, row_idx)
 }
 
-/// Exact nnz(L) (incl. diagonal) and flop proxy sum(cc^2) for the
-/// permuted pattern. `perm` is new-to-old.
 fn fill_of_perm(n: usize, col_ptr: &[i32], row_idx: &[i32], perm: &[i32]) -> (u64, f64) {
     let mut iperm: Vec<i32> = vec![0; n];
     for (new, &old) in perm.iter().enumerate() {
         iperm[old as usize] = new as i32;
     }
-    // Elimination tree via ancestor path compression (Davis alg. 4.1).
+    // https://doi.org/10.1137/1.9780898718881
     let mut parent: Vec<i32> = vec![-1; n];
     let mut ancestor: Vec<i32> = vec![-1; n];
-    let mut lower: Vec<Vec<i32>> = vec![Vec::new(); n]; // permuted strict lower adjacency per row i
+    let mut lower: Vec<Vec<i32>> = vec![Vec::new(); n];
     for i in 0..n {
         let old = perm[i] as usize;
         let lo = col_ptr[old] as usize;
@@ -84,7 +81,6 @@ fn fill_of_perm(n: usize, col_ptr: &[i32], row_idx: &[i32], perm: &[i32]) -> (u6
             }
         }
     }
-    // Column counts via row-subtree traversal.
     let mut cc: Vec<u32> = vec![1; n];
     let mut mark: Vec<i32> = vec![-1; n];
     for i in 0..n {
@@ -103,14 +99,9 @@ fn fill_of_perm(n: usize, col_ptr: &[i32], row_idx: &[i32], perm: &[i32]) -> (u6
     (nnz, flops)
 }
 
-/// Oracle: geometric nested dissection on the m^3 grid. Cuts the
-/// longest axis with a 1-thick mid-plane separator, recurses, numbers
-/// A, B, then the separator. Returns new-to-old.
 fn geometric_nd_perm(m: usize) -> Vec<i32> {
     let idx = |x: usize, y: usize, z: usize| ((z * m + y) * m + x) as i32;
     let mut perm: Vec<i32> = Vec::with_capacity(m * m * m);
-    // Box = [x0,x1) x [y0,y1) x [z0,z1). Emits vertex ids in
-    // elimination order (leaves first, separators last).
     struct Rec<'a> {
         perm: &'a mut Vec<i32>,
         idx: &'a dyn Fn(usize, usize, usize) -> i32,
@@ -170,9 +161,6 @@ fn geometric_nd_perm(m: usize) -> Vec<i32> {
     perm
 }
 
-/// Geometric ND with AMD-ordered box leaves of at most `leaf_max`
-/// vertices: perfect plane separators + the same leaf treatment as the
-/// rslab-metis driver. Isolates separator quality from leaf handling.
 fn geometric_nd_amd_perm(m: usize, leaf_max: usize) -> Vec<i32> {
     let idx = |x: usize, y: usize, z: usize| ((z * m + y) * m + x) as i32;
     let mut perm: Vec<i32> = Vec::with_capacity(m * m * m);
@@ -189,7 +177,6 @@ fn geometric_nd_amd_perm(m: usize, leaf_max: usize) -> Vec<i32> {
                 return;
             }
             if n <= self.leaf_max || dx.max(dy).max(dz) <= 1 {
-                // AMD on the leaf box (7-point pattern on dx x dy x dz).
                 let lidx = |x: usize, y: usize, z: usize| ((z * dy + y) * dx + x) as i32;
                 let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
                 for z in 0..dz {
@@ -278,7 +265,6 @@ fn main() {
     eprintln!("grid {m}^3, n={n}, nnz={}", ri.len());
     let pat = CscPattern::new(n, &cp, &ri).unwrap();
 
-    // AMD baseline in the same metric.
     let t0 = std::time::Instant::now();
     let amd_perm = rslab_amd::amd_order(&pat).unwrap();
     let (fill, flops) = fill_of_perm(n, &cp, &ri, &amd_perm);
@@ -290,7 +276,6 @@ fn main() {
         t0.elapsed().as_millis()
     );
 
-    // Geometric ND oracle: the fill target for a perfect separator tree.
     let t0 = std::time::Instant::now();
     let geo_perm = geometric_nd_perm(m);
     assert_eq!(geo_perm.len(), n);

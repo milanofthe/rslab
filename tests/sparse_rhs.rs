@@ -4,6 +4,9 @@
 //! near-singular one, empty and duplicate columns, a refactor; and its bits
 //! across thread counts.
 
+pub mod common;
+
+use common::constants::{bilinear_error, gamma, solve_backward_error, UC64};
 use num_complex::Complex;
 use rslab::matgen::stencil::{self, StencilOpts};
 use rslab::matgen::Rng;
@@ -11,12 +14,10 @@ use rslab::{CscMatrix, LdltSolver, Scalar, SolverSettings, SparseRhs, Threads};
 
 type C = Complex<f64>;
 
-/// Uniform in `[-1, 1)`.
 fn unit(rng: &mut Rng) -> f64 {
     rng.range(-1.0, 1.0)
 }
 
-/// Uniform in `0..n`.
 fn below(rng: &mut Rng, n: usize) -> usize {
     (rng.next_u64() % n as u64) as usize
 }
@@ -43,9 +44,6 @@ impl Draw for f32 {
     }
 }
 
-/// A random sparse symmetric matrix (lower triangle): `deg` random
-/// off-diagonals per column and the diagonal `diag + noise`; an indefinite
-/// one for a small `diag`.
 fn random_sym<T: Draw>(n: usize, deg: usize, diag: f64, seed: u64) -> CscMatrix<T> {
     let mut rng = Rng::new(seed);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -62,7 +60,6 @@ fn random_sym<T: Draw>(n: usize, deg: usize, diag: f64, seed: u64) -> CscMatrix<
             }
         }
     }
-    // a chain so the matrix is irreducible
     for j in 0..n - 1 {
         r.push(j + 1);
         c.push(j);
@@ -87,14 +84,10 @@ fn sum_duplicates<T: Scalar>(n: usize, r: &[usize], c: &[usize], v: &[T]) -> Csc
     CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
 }
 
-/// 2D 5-point `Lap - k2 I` on an `m x m` grid, Dirichlet (lower triangle).
 fn helmholtz(m: usize, k2: C) -> CscMatrix<C> {
     stencil::helmholtz(&[m, m], k2, &StencilOpts::default())
 }
 
-/// Pairs `(2i, 2i + 1)` with a zero diagonal coupled by `1`, weakly coupled
-/// to the next pair: every 1x1 pivot fails the Bunch-Kaufman test, so the
-/// factor takes 2x2 pivots.
 fn zero_diagonal_pairs<T: Draw>(pairs: usize, seed: u64) -> CscMatrix<T> {
     let n = 2 * pairs;
     let mut rng = Rng::new(seed);
@@ -109,8 +102,6 @@ fn zero_diagonal_pairs<T: Draw>(pairs: usize, seed: u64) -> CscMatrix<T> {
             T::zero(),
         ]);
         if p + 1 < pairs {
-            // both rows of a pair see the same neighbours, so a pair is
-            // one supervariable and its two columns share a supernode
             for (i, j) in [(a + 2, a), (b + 2, a), (a + 2, b), (b + 2, b)] {
                 r.push(i);
                 c.push(j);
@@ -121,7 +112,6 @@ fn zero_diagonal_pairs<T: Draw>(pairs: usize, seed: u64) -> CscMatrix<T> {
     CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// `p` ports of `k` random rows each with random weights.
 fn ports<T: Draw>(n: usize, p: usize, k: usize, seed: u64) -> SparseRhs<T> {
     let mut rng = Rng::new(seed);
     let cols: Vec<Vec<(usize, T)>> = (0..p)
@@ -138,7 +128,6 @@ fn settings(threads: usize) -> SolverSettings {
     SolverSettings::default().with_threads(Threads::Fixed(threads))
 }
 
-/// `B^T X` from the dense block solve.
 fn reference<T: Scalar>(f: &LdltSolver<T>, b: &SparseRhs<T>) -> Vec<T> {
     let x = f.solve_many(&b.to_dense(), b.ncols()).unwrap();
     b.transpose_times(&x, b.ncols()).unwrap()
@@ -150,6 +139,53 @@ fn max_rel_diff<T: Scalar>(a: &[T], b: &[T]) -> f64 {
         .map(|(&x, &y)| (x - y).magnitude())
         .fold(0.0, f64::max);
     diff / scale.max(f64::MIN_POSITIVE)
+}
+
+fn checked_port_bound(
+    a: &CscMatrix<C>,
+    f: &LdltSolver<C>,
+    b: &SparseRhs<C>,
+    per_port: usize,
+) -> f64 {
+    let mut rows = vec![0.0f64; a.n];
+    for j in 0..a.n {
+        for e in a.col_ptr[j]..a.col_ptr[j + 1] {
+            rows[a.row_idx[e]] += a.values[e].norm();
+            if a.row_idx[e] != j {
+                rows[j] += a.values[e].norm();
+            }
+        }
+    }
+    let a_norm = rows.iter().fold(0.0f64, |m, &v| m.max(v));
+    let (dense, p) = (b.to_dense(), b.ncols());
+    let x = f.solve_many(&dense, p).unwrap();
+    let col = |v: &[C], j: usize| -> Vec<f64> {
+        v[j * a.n..(j + 1) * a.n].iter().map(|e| e.norm()).collect()
+    };
+    let max_of = |v: Vec<f64>| v.into_iter().fold(0.0f64, f64::max);
+    let x_one = max_of((0..p).map(|j| col(&x, j).iter().sum()).collect());
+    let x_inf = max_of((0..p).map(|j| max_of(col(&x, j))).collect());
+    let b_inf = max_of((0..p).map(|j| max_of(col(&dense, j))).collect());
+    let products = max_of(
+        (0..p)
+            .flat_map(|i| (0..p).map(move |j| (i, j)))
+            .map(|(i, j)| (col(&dense, i).iter().zip(col(&x, j)).map(|(u, v)| u * v)).sum())
+            .collect(),
+    );
+    let omega = solve_backward_error(a.n, UC64);
+    for j in 0..p {
+        let mut ax = vec![C::new(0.0, 0.0); a.n];
+        a.symv(&x[j * a.n..(j + 1) * a.n], &mut ax);
+        let r = max_of(
+            (0..a.n)
+                .map(|i| (ax[i] - dense[j * a.n + i]).norm())
+                .collect(),
+        );
+        let w = r / (a_norm * max_of(col(&x, j)) + max_of(col(&dense, j)));
+        assert!(w <= omega, "column {j}: backward error {w:e}");
+    }
+    2.0 * bilinear_error(omega, a_norm, x_one, x_inf, b_inf)
+        + 2.0 * gamma(per_port, UC64) * products
 }
 
 fn assert_symmetric<T: Scalar>(z: &[T], p: usize) {
@@ -217,8 +253,7 @@ fn two_by_two_pivots_real_and_complex() {
         f.diagnostics().numeric.two_by_two.unwrap_or(0) > 0,
         "2x2 pivots taken"
     );
-    // a port on exactly one row of a pair and one on both
-    let b = SparseRhs::from_columns(
+    let ports_on_a_pair = SparseRhs::from_columns(
         600,
         &[
             vec![(10, C::new(1.0, 0.0))],
@@ -226,22 +261,20 @@ fn two_by_two_pivots_real_and_complex() {
         ],
     )
     .unwrap();
-    check(&a, &b, 1e-11);
+    check(&a, &ports_on_a_pair, 1e-11);
 }
 
 #[test]
 fn near_singular_helmholtz() {
-    // the first Dirichlet eigenvalue of the 5-point Laplacian on 30 x 30
     let m = 30;
     let s = (std::f64::consts::PI / (2.0 * (m as f64 + 1.0))).sin();
-    let lambda = 8.0 * s * s;
-    let a = helmholtz(m, C::new(lambda * (1.0 + 1e-9), 0.0));
+    let first_dirichlet_eigenvalue = 8.0 * s * s;
+    let a = helmholtz(m, C::new(first_dirichlet_eigenvalue * (1.0 + 1e-9), 0.0));
     let f = LdltSolver::factor(&a, &settings(1)).unwrap();
     let b = ports::<C>(m * m, 20, 4, 4);
     let z = f.port_matrix(&b).unwrap();
     assert_symmetric(&z, 20);
     let d = max_rel_diff(&z, &reference(&f, &b));
-    // conditioning ~1e10: both are accurate to about kappa * u
     assert!(d <= 1e-4, "near-singular port matrix differs by {d:e}");
     let norm = z.iter().map(|x| x.norm()).fold(0.0, f64::max);
     assert!(norm > 1e6, "the near-singular mode dominates Z ({norm:e})");
@@ -256,7 +289,6 @@ fn empty_and_duplicate_columns() {
         &[
             vec![(5, one), (77, C::new(0.5, -0.5))],
             vec![],
-            // the same row twice: counts with the sum of its values
             vec![
                 (5, C::new(0.25, 0.0)),
                 (5, C::new(0.75, 0.0)),
@@ -274,13 +306,18 @@ fn empty_and_duplicate_columns() {
         assert_eq!(z[p + j], C::new(0.0, 0.0), "empty column");
         assert_eq!(z[4 * p + j], C::new(0.0, 0.0), "empty column");
     }
-    // columns 0 and 2 are the same right-hand side
     for j in 0..p {
-        assert!((z[j] - z[2 * p + j]).norm() <= 1e-12 * z[j].norm().max(1.0));
+        assert_eq!(
+            z[j],
+            z[2 * p + j],
+            "a row given twice does not count with the sum of its values"
+        );
     }
-    // no columns at all
     let none = SparseRhs::<C>::from_columns(400, &[]).unwrap();
-    assert!(f.port_matrix(&none).unwrap().is_empty());
+    assert!(
+        f.port_matrix(&none).unwrap().is_empty(),
+        "no columns give a nonempty port matrix"
+    );
 }
 
 #[test]
@@ -291,8 +328,8 @@ fn same_bits_for_every_thread_count() {
     let base = sym.factor(&a, &settings(1)).unwrap();
     let z1 = base.port_matrix(&b).unwrap();
     for threads in [2, 4, 8] {
-        // `par_min_work: Some(0)` puts every section on the pool
-        for par in [None, Some(0)] {
+        let every_section_on_the_pool = Some(0);
+        for par in [None, every_section_on_the_pool] {
             let mut s = settings(threads);
             s.solve.par_min_work = par;
             let f = sym.factor(&a, &s).unwrap();
@@ -301,11 +338,10 @@ fn same_bits_for_every_thread_count() {
     }
 }
 
-/// A refactorization (same pattern, new values) gives the port matrix of
-/// the new values: the bits of a fresh factor's, and `B^T X` to rounding.
 #[test]
 fn refactor_with_new_values() {
-    let b = ports::<C>(1600, 30, 6, 11);
+    let per_port = 6;
+    let b = ports::<C>(1600, 30, per_port, 11);
     let sym =
         rslab::LdltSymbolic::analyze(&helmholtz(40, C::new(0.7, 0.02)), &settings(2)).unwrap();
     let mut f = sym
@@ -322,9 +358,13 @@ fn refactor_with_new_values() {
         z == fresh.port_matrix(&b).unwrap(),
         "refactor and fresh factor differ"
     );
-    let d = max_rel_diff(&z, &reference(&f, &b));
+    let bound = checked_port_bound(&a, &f, &b, per_port);
+    let r = reference(&f, &b);
+    let d = (z.iter().zip(&r))
+        .map(|(p, q)| (p - q).norm())
+        .fold(0.0, f64::max);
     assert!(
-        d <= 1e-11,
+        d <= bound,
         "refactored port matrix differs from B^T X by {d:e}"
     );
 }
@@ -347,8 +387,10 @@ fn reach_is_bounded_by_the_factor() {
     assert_eq!(full.supernodes, full.total_supernodes);
     assert_eq!(full.columns, 2500);
     assert_eq!(full.panel_entries, full.total_panel_entries);
-    // a corner node reaches a small part of a nested-dissection-like factor
-    assert!(r.panel_entries < full.total_panel_entries);
+    assert!(
+        r.panel_entries < full.total_panel_entries,
+        "a corner node reaches the whole factor"
+    );
     assert!(f.sparse_reach(&[2500]).is_err());
 }
 

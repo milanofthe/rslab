@@ -23,12 +23,9 @@ use rslab::{read_mtx_any, GeneralCsc, KluSettings, KluSymbolic, MtxLoaded};
 
 #[path = "ss_klu_ref.rs"]
 mod ss_klu_ref;
-use ss_klu_ref::SsKlu;
+use ss_klu_ref::{resid, SsKlu};
 
-/// Real circuit / post-layout simulation matrices, ascending size. The core
-/// set matches the families benchmarked in the KLU paper (Davis & Palamadai
-/// Natarajan 2010): Bomhof+Hamm SPICE matrices, AT&T harmonic balance,
-/// Sandia ASIC, Rajat post-layout.
+// https://doi.org/10.1145/1824801.1824814
 const CORPUS: &[(&str, &str)] = &[
     ("Bomhof", "circuit_1"),
     ("Bomhof", "circuit_2"),
@@ -48,18 +45,6 @@ const CORPUS_BIG: &[(&str, &str)] = &[("Freescale", "memchip")];
 
 const SWEEP: usize = 20;
 
-fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
-    let mut ax = vec![0.0; a.n];
-    a.matvec(x, &mut ax);
-    let num = b
-        .iter()
-        .zip(&ax)
-        .map(|(bi, axi)| (bi - axi).abs())
-        .fold(0.0, f64::max);
-    num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
-}
-
-/// Load `<group>/<name>` as a real general CSC, or explain why not.
 fn load(group: &str, name: &str) -> Result<GeneralCsc<f64>, String> {
     let path = fetch(group, name)?;
     match read_mtx_any(&path).map_err(|e| format!("parse: {e}"))? {
@@ -81,14 +66,13 @@ fn load(group: &str, name: &str) -> Result<GeneralCsc<f64>, String> {
 }
 
 struct Row {
-    fac_ratio: f64,   // ss / rslab-seq
-    refac_ratio: f64, // ss / rslab-seq
-    sweep_ratio: f64, // ss / rslab-seq
+    fac_ratio: f64,
+    refac_ratio: f64,
+    sweep_ratio: f64,
     par_fac_ratio: f64,
     par_sweep_ratio: f64,
 }
 
-/// Append one JSONL record to `RLA_BENCH_OUT` (no-op when unset).
 #[allow(clippy::too_many_arguments)]
 fn emit(
     group: &str,
@@ -96,7 +80,7 @@ fn emit(
     n: usize,
     nnz: usize,
     solver: &str,
-    times: [f64; 5], // ana, fac, refac, solve, sweep (seconds; NaN = n/a)
+    [ana_s, fac_s, refac_s, slv_s, sweep_s]: [f64; 5],
     fill: i64,
     blocks: i64,
     res: f64,
@@ -106,8 +90,8 @@ fn emit(
     };
     let rec = serde_json::json!({
         "group": group, "name": name, "n": n, "nnz": nnz, "solver": solver,
-        "ana_s": times[0], "fac_s": times[1], "refac_s": times[2],
-        "slv_s": times[3], "sweep_s": times[4],
+        "ana_s": ana_s, "fac_s": fac_s, "refac_s": refac_s,
+        "slv_s": slv_s, "sweep_s": sweep_s,
         "fill": fill, "blocks": blocks, "res": res,
     });
     use std::io::Write;
@@ -148,7 +132,6 @@ fn main() {
         let mut b = vec![0.0; n];
         a.matvec(&xt, &mut b);
 
-        // --- RSLAB KLU, strictly sequential (default settings otherwise) ---
         let seq = KluSettings::default().with_parallel(rslab::KluParallel::Off);
         let t = Instant::now();
         let sym = match KluSymbolic::analyze(&a, &seq) {
@@ -205,7 +188,6 @@ fn main() {
             res,
         );
 
-        // --- RSLAB KLU, opt-in parallel per-block factor/refactor ---
         let par = KluSettings::default().with_parallel(rslab::KluParallel::On);
         let t = Instant::now();
         let mut klu_p = sym.factor(&a, &par).unwrap();
@@ -245,7 +227,6 @@ fn main() {
             res,
         );
 
-        // --- SuiteSparse KLU, same matrix, same phases ---
         if let Some(ss) = &ss {
             if let Some((r, xs)) = ss.run(&a, &b, SWEEP) {
                 let res_ss = resid(&a, &xs, &b);

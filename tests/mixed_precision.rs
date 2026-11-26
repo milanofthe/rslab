@@ -3,15 +3,16 @@
 //! columns at once, and refinement against the full-precision matrix
 //! recovers its accuracy.
 
+pub mod common;
+
+use common::constants::{recomputed_residual, solve_backward_error, U64};
 use num_complex::Complex64;
 use rslab::{
     gmres_block, BackwardError, CscMatrix, Factorization, GeneralCsc, KrylovSettings, LdltSymbolic,
-    LinearOperator, LuSymbolic, MixedPrecision, Preconditioner, RefinePolicy, Scalar,
+    LuSymbolic, MixedPrecision, Preconditioner, RefineOperator, RefinePolicy, Scalar,
     SolverSettings,
 };
 
-/// 2D grid (k x k) with a complex shift, full (`sym = false`, a small skew on
-/// the couplings) or the lower triangle of the symmetric one.
 fn grid<T: Scalar>(
     k: usize,
     sym: bool,
@@ -50,16 +51,36 @@ fn grid<T: Scalar>(
     (k * k, r, c, v)
 }
 
-fn residual<T: Scalar>(a: &dyn LinearOperator<T>, x: &[T], b: &[T]) -> f64 {
+fn residual<T: Scalar>(a: &dyn RefineOperator<T>, x: &[T], b: &[T]) -> (f64, f64) {
     let mut ax = vec![T::zero(); b.len()];
     a.apply(x, &mut ax);
+    let mut abs_ax = vec![0.0; b.len()];
+    a.apply_abs(x, &mut abs_ax);
     let r: f64 = ax
         .iter()
         .zip(b)
         .map(|(&p, &q)| (p - q).magnitude_sq())
         .sum();
-    let nb: f64 = b.iter().map(|v| v.magnitude_sq()).sum();
-    (r / nb).sqrt()
+    let s: f64 = abs_ax
+        .iter()
+        .zip(b)
+        .map(|(&p, &q)| (p + q.magnitude()).powi(2))
+        .sum();
+    (r.sqrt(), s.sqrt())
+}
+
+fn backward_error<T: Scalar>(a: &dyn RefineOperator<T>, x: &[T], b: &[T]) -> f64 {
+    let mut ax = vec![T::zero(); b.len()];
+    a.apply(x, &mut ax);
+    let mut rows = vec![0.0; b.len()];
+    a.apply_abs(&vec![T::one(); b.len()], &mut rows);
+    let inf = |v: &[T]| v.iter().map(|e| e.magnitude()).fold(0.0, f64::max);
+    let r = ax
+        .iter()
+        .zip(b)
+        .map(|(&p, &q)| (p - q).magnitude())
+        .fold(0.0, f64::max);
+    r / (rows.iter().fold(0.0f64, |m, &v| m.max(v)) * inf(x) + inf(b))
 }
 
 #[test]
@@ -68,7 +89,6 @@ fn block_gmres_with_a_single_precision_lu_reaches_double_accuracy() {
     let (n, r, cc, v) = grid(40, false, c(4.0, 0.5), c(-1.0, 0.1));
     let a = GeneralCsc::from_triplets(n, &r, &cc, &v).unwrap();
     let opts = SolverSettings::default();
-    // One analysis for both precisions.
     let sym = LuSymbolic::analyze(&a, &opts).unwrap();
     let m = MixedPrecision::new(sym.factor(&a.demoted(), &opts).unwrap());
     let nrhs = 3;
@@ -76,8 +96,6 @@ fn block_gmres_with_a_single_precision_lu_reaches_double_accuracy() {
         .map(|i| c((i % 7) as f64 - 3.0, 0.5))
         .collect();
 
-    // The block apply solves the columns together and agrees with the column
-    // loop to single precision (its products sum in their own order).
     let mut z = vec![Complex64::default(); n * nrhs];
     m.apply_block(&b, &mut z, nrhs, n).unwrap();
     for col in 0..nrhs {
@@ -91,9 +109,19 @@ fn block_gmres_with_a_single_precision_lu_reaches_double_accuracy() {
     let settings = KrylovSettings::default().with_tol(1e-10);
     let res = gmres_block(&a, &b, nrhs, &m, &settings, None, None).unwrap();
     assert!(res.converged);
+    let row_len = (0..n)
+        .map(|i| r.iter().filter(|&&ri| ri == i).count())
+        .max()
+        .unwrap();
     for col in 0..nrhs {
         let (x, bc) = (&res.x[col * n..(col + 1) * n], &b[col * n..(col + 1) * n]);
-        assert!(residual(&a, x, bc) < 1e-9, "column {col}");
+        let (rn, abs_norm) = residual(&a, x, bc);
+        let bn = bc.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
+        assert!(
+            rn <= recomputed_residual(settings.tol, bn, abs_norm, n, row_len, U64),
+            "column {col}: {}",
+            rn / bn
+        );
     }
 }
 
@@ -105,7 +133,6 @@ fn refinement_against_the_double_matrix_recovers_double_accuracy() {
         measure: BackwardError::Normwise,
         ..Default::default()
     };
-    // Real symmetric: LDL^T in f32 under f64 refinement.
     let (n, r, c, v) = grid(40, true, 4.5f64, -1.0);
     let a = CscMatrix::from_triplets(n, &r, &c, &v).unwrap();
     let sym = LdltSymbolic::analyze(&a, &SolverSettings::default()).unwrap();
@@ -116,7 +143,24 @@ fn refinement_against_the_double_matrix_recovers_double_accuracy() {
     let b: Vec<f64> = (0..n).map(|i| (i % 5) as f64 - 2.0).collect();
     let once = Factorization::solve(&m, &b).unwrap();
     let (x, outcome) = m.solve_refined(&a, &b, &policy).unwrap();
-    assert!(residual(&a, &once, &b) > 1e-9, "one single-precision solve");
-    assert!(residual(&a, &x, &b) < 1e-13, "refined: {outcome:?}");
+    let row_len = (0..n)
+        .map(|i| {
+            r.iter()
+                .zip(&c)
+                .filter(|&(&ri, &ci)| ri == i || ci == i)
+                .count()
+        })
+        .max()
+        .unwrap();
+    assert!(
+        backward_error(&a, &once, &b) > solve_backward_error(n, U64),
+        "one single-precision solve"
+    );
+    assert!(outcome.certified, "refined: {outcome:?}");
+    let omega = backward_error(&a, &x, &b);
+    assert!(
+        omega <= recomputed_residual(policy.target, 1.0, 1.0, n, row_len, U64),
+        "refined: {omega:e}, {outcome:?}"
+    );
     assert_eq!(f64::promote(1.5f64.demote()), 1.5);
 }

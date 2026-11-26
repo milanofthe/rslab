@@ -146,13 +146,10 @@ impl Workspace {
         let n = pattern.n;
         debug_assert!(n_buckets >= n, "n_buckets must cover deg in [0, n)");
 
-        // i32 addressing requires n < i32::MAX. The algorithm also
-        // stores `pfree` as i32 via `pe[i]`, so iwlen must fit.
         if n >= i32::MAX as usize {
             return Err(OrderingError::IndexOverflow);
         }
 
-        // Count off-diagonal entries per column.
         let mut len: Vec<i32> = vec![0; n];
         let mut nzaat: usize = 0;
         #[allow(clippy::needless_range_loop)]
@@ -170,7 +167,6 @@ impl Workspace {
             nzaat += cnt;
         }
 
-        // iwlen = nzaat + nzaat/5 + n  (faer amd.rs:921-924).
         let iwlen = nzaat
             .checked_add(nzaat / crate::constants::ELBOW_DIV)
             .and_then(|s| s.checked_add(n))
@@ -178,12 +174,8 @@ impl Workspace {
         if iwlen > i32::MAX as usize {
             return Err(OrderingError::IndexOverflow);
         }
-        // iw needs at least one slot even when n==0 so `pfree` is
-        // addressable; we allocate exactly iwlen.
         let mut iw: Vec<i32> = vec![0; iwlen];
 
-        // pe[j] = start of j's adjacency list in iw; fill iw with
-        // off-diagonals, in the order they appear in the CSC pattern.
         let mut pe: Vec<i32> = vec![0; n];
         let mut pfree: usize = 0;
         #[allow(clippy::needless_range_loop)]
@@ -201,7 +193,6 @@ impl Workspace {
         }
         debug_assert_eq!(pfree, nzaat);
 
-        // Dense threshold. alpha < 0 disables dense deferral.
         let dense = if opts.dense_alpha < 0.0 {
             n.saturating_sub(2)
         } else {
@@ -209,7 +200,6 @@ impl Workspace {
         };
         let dense = dense.max(crate::constants::DENSE_DEGREE_MIN).min(n);
 
-        // Fixed-value arrays.
         let mut nv: Vec<i32> = vec![1; n];
         let mut elen: Vec<i32> = vec![0; n];
         let mut w: Vec<i32> = vec![1; n];
@@ -220,33 +210,25 @@ impl Workspace {
         let mut wf: Vec<i64> = vec![0; n];
 
         let wbig = i32::MAX - n as i32;
-        let wflg = 0; // clear_flag will lift to 2 on first use.
+        let wflg = 0;
 
         let mut nel: usize = 0;
         let mut ndense: i32 = 0;
 
-        // Classify each variable.
         for i in 0..n {
             let deg = degree[i] as usize;
             if deg == 0 {
-                // Zero-degree fast path - pre-eliminated.
                 elen[i] = flip(1);
                 nel += 1;
                 pe[i] = NONE;
                 w[i] = 0;
             } else if deg > dense {
-                // Dense-deferred fast path.
                 ndense += 1;
                 nv[i] = 0;
                 elen[i] = NONE;
                 pe[i] = NONE;
                 nel += 1;
             } else {
-                // LIFO head-insert at head[deg]. The AMF metric's
-                // `bucket(deg, n)` is identity for `deg <= n`, so the
-                // index `deg` is the right slot for both AMD and AMF
-                // at init time. Seed the AMF fill score so the AMF
-                // path can compute `bucket(wf[i], n)` consistently.
                 let inext = head[deg];
                 if inext != NONE {
                     last[inext as usize] = i as i32;

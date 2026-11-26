@@ -3,12 +3,9 @@ use crate::numeric::settings::SolverSettings;
 use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::OrderingMethod;
+use crate::test_constants::{solve_backward_error, U64, UC64};
 use num_complex::Complex;
 
-/// A tridiagonal (chain) matrix with no amalgamation (`nemin = 1`) builds an
-/// assembly tree as deep as the matrix; the recursive tree factorization must
-/// not overflow the worker stack on either path. Regression for the
-/// `STATUS_STACK_OVERFLOW` the auto-tuning sweep hit on banded + `nemin = 1`.
 #[test]
 fn deep_chain_tree_does_not_overflow_stack() {
     let n = 20_000usize;
@@ -24,7 +21,6 @@ fn deep_chain_tree_does_not_overflow_stack() {
         }
     }
     let a = CscMatrix::<f64>::from_triplets(n, &rows, &cols, &vals).unwrap();
-    // On all cores, and on one, where it runs on the calling thread.
     for threads in [0, 1] {
         let s = SolverSettings::default()
             .with_nemin(1)
@@ -36,8 +32,6 @@ fn deep_chain_tree_does_not_overflow_stack() {
 
 #[test]
 fn rcm_and_autorace_orderings_factor_and_solve() {
-    // A 2D-grid SPD system must factor and solve correctly under the new RCM
-    // ordering and under the race (which includes RCM as a candidate).
     let m = 14;
     let n = m * m;
     let idx = |a: usize, b: usize| a * m + b;
@@ -66,27 +60,37 @@ fn rcm_and_autorace_orderings_factor_and_solve() {
         let opts = SolverSettings::default().with_ordering(ord);
         let x = LdltSolver::factor(&a, &opts).unwrap().solve(&b).unwrap();
         assert!(
-            residual_inf(&a, &x, &b) < 1e-9,
+            backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
             "ordering {ord:?} residual {}",
-            residual_inf(&a, &x, &b)
+            backward_error(&a, &x, &b)
         );
     }
 }
 
-/// The number of 2x2 pivot blocks of a factorization.
 fn two_by_two<T: Scalar>(f: &LdltSolver<T>) -> usize {
     f.diagnostics().numeric.two_by_two.unwrap_or(0)
 }
 
-fn residual_inf<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
+pub(super) fn backward_error<T: Scalar>(a: &CscMatrix<T>, x: &[T], b: &[T]) -> f64 {
     let mut ax = vec![T::zero(); a.n];
     a.symv(x, &mut ax);
-    (0..a.n)
+    let mut rows = vec![0.0f64; a.n];
+    for j in 0..a.n {
+        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
+            let i = a.row_idx[k];
+            rows[i] += a.values[k].magnitude();
+            if i != j {
+                rows[j] += a.values[k].magnitude();
+            }
+        }
+    }
+    let inf = |v: &[T]| v.iter().map(|e| e.magnitude()).fold(0.0, f64::max);
+    let r = (0..a.n)
         .map(|i| (ax[i] - b[i]).magnitude())
-        .fold(0.0, f64::max)
+        .fold(0.0, f64::max);
+    r / (rows.iter().fold(0.0f64, |m, &v| m.max(v)) * inf(x) + inf(b))
 }
 
-/// 1D Laplacian-style SPD tridiagonal of size n (diag 2+something, off -1).
 fn tridiag_spd_f64(n: usize) -> CscMatrix<f64> {
     let mut rows = Vec::new();
     let mut cols = Vec::new();
@@ -110,11 +114,9 @@ fn f64_sparse_tridiag_residual() {
     let b: Vec<f64> = (0..20).map(|i| (i as f64) - 9.5).collect();
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(residual_inf(&a, &x, &b) < 1e-10);
+    assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64));
 }
 
-/// 2D 5-point grid (mxm), lower triangle, complex-symmetric, diagonally
-/// dominant. Branching assembly tree -> exercises multi-child `cmod`.
 fn grid2d_lower<T: Scalar>(m: usize, diag: T, off: T) -> CscMatrix<T> {
     let n = m * m;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -142,9 +144,6 @@ fn grid2d_lower<T: Scalar>(m: usize, diag: T, off: T) -> CscMatrix<T> {
 
 #[test]
 fn indefinite_2x2_inertia() {
-    // [[0,1],[1,0]] (eigenvalues +/-1) forces a single 2x2 Bunch-Kaufman block.
-    // The left-looking path must take that 2x2 (zero diagonal -> no 1x1 pivot)
-    // and report inertia (1+, 1-).
     let a = CscMatrix::<f64>::from_triplets(2, &[0, 1], &[0, 0], &[0.0, 1.0]).unwrap();
     let ll = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     assert!(two_by_two(&ll) > 0, "expected a 2x2 block");
@@ -158,15 +157,14 @@ fn indefinite_2x2_inertia() {
     );
     let b = [1.0_f64, -2.0];
     let x = ll.solve(&b).unwrap();
-    assert!(residual_inf(&a, &x, &b) < 1e-12, "2x2 residual");
+    assert!(
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
+        "2x2 backward error"
+    );
 }
 
 #[test]
 fn indefinite_2d_grid_solves() {
-    // 2D 5-point grid with a *small* diagonal (0.5 << 2*|off|): far from
-    // diagonally dominant -> genuinely indefinite, so Bunch-Kaufman must take
-    // many 2x2 pivots across several supernodes and still give a true solve -
-    // the exact indefinite EM-FEM case the 2x2 pivoting is for.
     let a = grid2d_lower::<f64>(10, 0.5, -1.0);
     let n = a.n;
     let b: Vec<f64> = (0..n).map(|i| (i % 7) as f64 - 3.0).collect();
@@ -181,16 +179,13 @@ fn indefinite_2d_grid_solves() {
     );
     let xl = ll.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &xl, &b) < 1e-9,
+        backward_error(&a, &xl, &b) <= solve_backward_error(n, U64),
         "left-looking indefinite residual"
     );
 }
 
 #[test]
 fn indefinite_complex_symmetric() {
-    // Complex-symmetric indefinite grid: the 2x2 path is type-agnostic. The
-    // 2x2 blocks here are complex-symmetric (not Hermitian), exercising the
-    // generic det/detinv arithmetic.
     let c = |re: f64, im: f64| Complex::new(re, im);
     let a = grid2d_lower::<Complex<f64>>(9, c(0.4, 0.3), c(-1.0, 0.1));
     let n = a.n;
@@ -207,16 +202,13 @@ fn indefinite_complex_symmetric() {
     );
     let xl = ll.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &xl, &b) < 1e-9,
+        backward_error(&a, &xl, &b) <= solve_backward_error(n, UC64),
         "complex left-looking indefinite residual"
     );
 }
 
 #[test]
 fn f64_dense_front_blocked_multi_panel() {
-    // A fully dense symmetric matrix is one front of width n=100 > NB(64),
-    // so factoring it exercises the blocked **multi-panel** Bunch-Kaufman
-    // path (which the small n<=50 tests never reach). Diagonally dominant SPD.
     let n = 100;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
     for j in 0..n {
@@ -235,15 +227,14 @@ fn f64_dense_front_blocked_multi_panel() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
 #[test]
 fn complex_dense_front_blocked_multi_panel() {
-    // Dense complex-symmetric, one front of width 90 > NB -> multi-panel.
     let c = |re: f64, im: f64| Complex::new(re, im);
     let n = 90;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -262,12 +253,11 @@ fn complex_dense_front_blocked_multi_panel() {
     let b = vec![c(1.0, 0.5); n];
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
-    assert!(residual_inf(&a, &x, &b) < 1e-9);
+    assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, UC64));
 }
 
 #[test]
 fn f64_sparse_2d_grid_residual() {
-    // 2D 5-point Laplacian on a 5x5 grid (n=25), SPD.
     let m = 5;
     let n = m * m;
     let mut rows = Vec::new();
@@ -280,7 +270,6 @@ fn f64_sparse_2d_grid_residual() {
             rows.push(p);
             cols.push(p);
             vals.push(4.0);
-            // lower-triangle neighbors only
             if c + 1 < m {
                 let q = idx(r, c + 1);
                 let (hi, lo) = if q >= p { (q, p) } else { (p, q) };
@@ -302,17 +291,14 @@ fn f64_sparse_2d_grid_residual() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
 #[test]
 fn complex_sparse_tridiag_residual() {
-    // Complex-symmetric Helmholtz-style tridiagonal: diagonal (4 + 0.5i),
-    // off-diagonal (-1 + 0.1i). Complex symmetric (A = A^T), diagonally
-    // dominant so the fully-summed blocks stay nonsingular.
     let c = |re, im| Complex::new(re, im);
     let n = 16;
     let mut rows = Vec::new();
@@ -333,16 +319,14 @@ fn complex_sparse_tridiag_residual() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-10,
+        backward_error(&a, &x, &b) <= solve_backward_error(n, UC64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
 #[test]
 fn complex_sparse_large_grid_parallel() {
-    // 12x12 complex-symmetric grid (n=144): a deep, bushy assembly tree
-    // that genuinely exercises multiple parallel levels in the rayon driver.
     let c = |re, im| Complex::new(re, im);
     let m = 12;
     let n = m * m;
@@ -377,18 +361,14 @@ fn complex_sparse_large_grid_parallel() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, UC64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }
 
 #[test]
 fn perturb_rescues_singular_complex() {
-    // Structurally singular complex-symmetric system: index 1 is fully
-    // decoupled with a zero diagonal (zero row/column). Exact mode must
-    // fail; static-pivoting (preconditioner) mode must succeed, report a
-    // perturbation, and produce a finite, solvable factor of `A + E`.
     let c = |re, im| Complex::new(re, im);
     let n = 3;
     let rows = vec![0, 2, 1];
@@ -418,8 +398,6 @@ fn perturb_rescues_singular_complex() {
 
 #[test]
 fn exact_mode_never_perturbs_well_conditioned() {
-    // A diagonally dominant complex-symmetric grid factors exactly with no
-    // perturbation - the static-pivot path must not trigger spuriously.
     let a = {
         let c = |re, im| Complex::new(re, im);
         let n = 16;
@@ -447,7 +425,6 @@ fn exact_mode_never_perturbs_well_conditioned() {
 
 #[test]
 fn complex_sparse_2d_grid_residual() {
-    // 2D complex-symmetric grid: diagonal (4 + i), neighbor (-1 + 0.2i).
     let c = |re, im| Complex::new(re, im);
     let m = 5;
     let n = m * m;
@@ -482,8 +459,8 @@ fn complex_sparse_2d_grid_residual() {
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
     let x = f.solve(&b).unwrap();
     assert!(
-        residual_inf(&a, &x, &b) < 1e-9,
+        backward_error(&a, &x, &b) <= solve_backward_error(a.n, UC64),
         "residual {}",
-        residual_inf(&a, &x, &b)
+        backward_error(&a, &x, &b)
     );
 }

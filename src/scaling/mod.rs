@@ -53,21 +53,7 @@ mod twosided;
 
 pub(crate) use twosided::equilibrate_general;
 
-/// One Knight-Ruiz equilibration step `d <- d / sqrt(m)`, guarded against
-/// overflow/underflow. Applies the update only when
-/// the result stays finite and strictly positive; otherwise `d` is held at
-/// its last good value. `m` is the row/column infinity-norm and is assumed
-/// `> 0` (the caller's existing `m > 0` guard).
-///
-/// On well-scaled matrices `d / sqrt(m)` is always finite and positive, so
-/// this is **bit-identical** to the bare division - the guard bites only on
-/// extreme or subnormal couplings, where the unguarded `d` would reach
-/// `+-Inf` (then `NaN` on the next sweep) or `0`. Such a value silently
-/// poisons every coupled row: the factorization sees a zeroed/NaN row, the
-/// static pivot perturbation "repairs" it, and the solve returns garbage
-/// with no error. Keeping `d` finite each sweep - rather than only
-/// sanitizing at the end - also stops one overflowing row from dragging its
-/// neighbours to zero.
+// https://github.com/milanofthe/rslab/issues/291
 #[inline]
 pub(crate) fn kr_guarded_update(d: f64, m: f64) -> f64 {
     let cand = d / m.sqrt();
@@ -78,11 +64,6 @@ pub(crate) fn kr_guarded_update(d: f64, m: f64) -> f64 {
     }
 }
 
-/// Guarded one-pass scale factor `1 / sqrt(m)` (single Knight-Ruiz
-/// step): a zero, non-finite, or overflow-prone row max
-/// yields the neutral `1.0` instead of a `0`/`Inf`/`NaN` factor that would
-/// silently poison the equilibrated matrix. Bit-identical to the bare
-/// expression for every healthy `m` (finite, `> 0`, not extreme).
 #[inline]
 pub(crate) fn inv_sqrt_scale_guarded(m: f64) -> f64 {
     if m > 0.0 {
@@ -143,11 +124,9 @@ pub enum ScalingInfo {
     /// number of variables that could not be matched. The returned
     /// scaling vector has `1.0` at the unmatched positions.
     PartialSingular { n_unmatched: usize },
-    /// The scaling vector is all-ones - applying it is a no-op, so the
-    /// solve path skips pre/post scaling entirely. Produced only by
+    /// The scaling vector is all-ones. Produced only by
     /// `ScalingStrategy::Identity`. (`External` reports `Applied` even
-    /// when its vector happens to be all-ones, since the factor still
-    /// runs the scaling loop.)
+    /// when its vector happens to be all-ones.)
     NotApplied,
 }
 
@@ -155,11 +134,11 @@ pub enum ScalingInfo {
 /// matrix stored in CSC with only the lower triangle, following
 /// `strategy`.
 ///
-/// Returns a vector of length `n` in **user-order** indexing such
-/// that applying `D = diag(scaling)` as the congruence transform
-/// `D * A * D` produces a matrix whose largest-magnitude entries lie
-/// on the diagonal. The off-diagonals are bounded by 1 in absolute
-/// value when MC64 succeeds on a non-singular matrix.
+/// Returns a vector of length `n` in **user-order** indexing that is
+/// applied as the congruence transform `D * A * D` with
+/// `D = diag(scaling)`. When `Mc64Symmetric` succeeds on a non-singular
+/// matrix, the largest-magnitude entries of `D * A * D` lie on the
+/// diagonal and the off-diagonals are bounded by 1 in absolute value.
 pub fn compute_scaling(
     matrix: &CscMatrix,
     strategy: &ScalingStrategy,
@@ -174,14 +153,6 @@ pub fn compute_scaling(
                     matrix.n,
                 )));
             }
-            // `Applied`, not `NotApplied`: the factor scales the matrix
-            // by `D = diag(s)` unconditionally, so the solve MUST undo
-            // it. `NotApplied` is a load-bearing invariant meaning "the
-            // scaling vector is all-ones" - the solve keys off it to
-            // skip pre/post scaling (`solve_sparse`). Pairing a real
-            // `s` with `NotApplied` factors `D*A*D` but solves it as
-            // `A`, returning `D^-1A^-1D^-1b`. `s` may itself be all-ones,
-            // in which case `Applied` just does bit-exact `x1.0` no-ops.
             Ok((s.clone(), ScalingInfo::Applied))
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),

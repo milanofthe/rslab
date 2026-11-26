@@ -1,16 +1,15 @@
 //! The refinement contract: what "converged" means, what is reported, and that
 //! the in-place entry points agree with the allocating ones.
 
+pub mod common;
+
+use common::constants::{gamma, recomputed_residual, U64};
 use num_complex::Complex64 as Z;
 use rslab::prelude::*;
 use rslab::{
     BackwardError, MixedPrecision, PivotFloor, RefineOperator, RefinePolicy, RefineSystem,
 };
 
-/// Diagonal system whose last equation is scaled down by `1e-12`. Its solution
-/// is `(1, 1, 1)` in every row, but an error in the third component is invisible
-/// to a normwise measure and obvious to a componentwise one: the row's own
-/// scale, not the matrix norm, is what that component is measured against.
 fn tiny_row_system() -> (CscMatrix<f64>, Vec<f64>) {
     let a = CscMatrix::<f64>::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1e-12]).unwrap();
     let b = vec![1.0, 1.0, 1e-12];
@@ -21,8 +20,6 @@ fn tiny_row_system() -> (CscMatrix<f64>, Vec<f64>) {
 fn normwise_certifies_what_componentwise_rejects() {
     let (a, b) = tiny_row_system();
     let f = LdltSolver::factor(&a, &SolverSettings::default()).unwrap();
-    // Measure only: no correction step, so this tests the criterion rather than
-    // the solver.
     let measure_only = |m| RefinePolicy {
         max_steps: 0,
         target: 4.0 * f64::EPSILON,
@@ -31,6 +28,7 @@ fn normwise_certifies_what_componentwise_rejects() {
     };
 
     let mut x = vec![1.0, 1.0, 1.0 + 1e-4];
+    let delta = x[2] - 1.0;
     let norm = f
         .refine_into(&a, &b, &mut x, &measure_only(BackwardError::Normwise))
         .unwrap();
@@ -45,14 +43,15 @@ fn normwise_certifies_what_componentwise_rejects() {
         norm.omega
     );
     assert!(
-        !comp.certified && comp.omega > 1e-6,
+        !comp.certified
+            && comp.omega
+                >= (delta - gamma(2, U64) * (1.0 + delta))
+                    / ((2.0 + delta) * (1.0 + gamma(2, U64))),
         "componentwise should reject it: omega {:.3e}",
         comp.omega
     );
 }
 
-/// The default policy stops at the roundoff floor instead of spending its
-/// budget, and says so.
 #[test]
 fn default_policy_stops_at_the_target() {
     let n = 60;
@@ -89,11 +88,20 @@ fn default_policy_stops_at_the_target() {
         .zip(&b)
         .map(|(p, q)| (p - q).abs())
         .fold(0.0, f64::max);
-    assert!(res < 1e-10, "residual {res:.3e}");
+    let mut abs_ax = vec![0.0; n];
+    a.apply_abs(&x, &mut abs_ax);
+    let abs_norm = abs_ax
+        .iter()
+        .zip(&b)
+        .map(|(p, q)| p + q.abs())
+        .fold(0.0, f64::max);
+    let row_len = 3;
+    assert!(
+        res <= recomputed_residual(policy.target, abs_norm, abs_norm, n, row_len, U64),
+        "residual {res:.3e}"
+    );
 }
 
-/// In-place refinement and the allocating entry point produce the same bits,
-/// and the legacy fixed-step call is the `steps` policy.
 #[test]
 fn entry_points_agree_bitwise() {
     let n = 40;
@@ -122,7 +130,6 @@ fn entry_points_agree_bitwise() {
     }
 }
 
-/// The same contract on the unsymmetric and circuit paths.
 #[test]
 fn lu_and_klu_report_the_same_way() {
     let n = 30;
@@ -152,24 +159,10 @@ fn lu_and_klu_report_the_same_way() {
     assert!(out.certified, "klu omega {:.3e}", out.omega);
 }
 
-// ---------------------------------------------------------------------------
-// Static pivoting: the factor is of `A + E`, `E` its reported pivot floors.
-// ---------------------------------------------------------------------------
-
-/// The floor every test below factors with: on the equilibrated matrix
-/// (entries of order one) it lifts the pivots the repeated constraints
-/// leave at roundoff, and is large enough that `E` dominates the error of
-/// a refinement against `A`.
 const FLOOR: f64 = 1e-2;
 
-/// `|b - (A + E) x| / |b|` below which a system counts as solved to roundoff.
 const ROUNDOFF: f64 = 1e-12;
 
-/// A saddle point `[K B; B^T 0]` whose constraints repeat: every third
-/// column of `B` copies the one before it, so `A` is singular and static
-/// pivoting has to lift pivots. `K` is a complex grid operator on `m x m`
-/// nodes, symmetric when `symmetric` (then only the lower triangle is
-/// returned, the `LdltSolver` input). Triplets `(n, rows, cols, values)`.
 fn floored_saddle(symmetric: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<Z>) {
     let (m, n2) = (10usize, 24usize);
     let n1 = m * m;
@@ -222,7 +215,6 @@ fn norm(v: &[Z]) -> f64 {
     v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt()
 }
 
-/// `|b - (A + E) x| / |b|`, `E` the floors.
 fn floored_residual<A: RefineOperator<Z>>(
     a: &A,
     floors: &[PivotFloor<Z>],
@@ -238,10 +230,6 @@ fn floored_residual<A: RefineOperator<Z>>(
     norm(&r) / norm(b)
 }
 
-/// The floors are the matrix the factor is of: a plain solve solves `A + E`
-/// to roundoff, with and without the row matching (whose permutation and
-/// scaling the reported entries undo), where it leaves a large residual
-/// against `A`.
 #[test]
 fn lu_perturbations_are_the_factored_matrix() {
     let (n, r, c, v) = floored_saddle(false);
@@ -282,7 +270,6 @@ fn lu_perturbations_are_the_factored_matrix() {
     }
 }
 
-/// The symmetric path the same way: the floors sit on the diagonal.
 #[test]
 fn ldlt_perturbations_are_the_factored_matrix() {
     let (n, r, c, v) = floored_saddle(true);
@@ -292,16 +279,16 @@ fn ldlt_perturbations_are_the_factored_matrix() {
     let floors = s.perturbations();
     assert!(!floors.is_empty(), "no floor");
     assert_eq!(floors.len(), s.n_perturbed());
-    assert!(floors.iter().all(|f| f.row == f.col));
+    assert!(
+        floors.iter().all(|f| f.row == f.col),
+        "an LDL^T floor sits off the diagonal"
+    );
     let x = s.solve(&b).unwrap();
     let be = floored_residual(&a, floors, &x, &b);
     eprintln!("ldlt: {} floors, |b - (A + E) x| {be:.1e}", floors.len());
     assert!(be < ROUNDOFF, "|b - (A + E) x|/|b| = {be:.1e}");
 }
 
-/// Refinement against `A` cannot converge on a singular `A` (the correction
-/// `(A + E)^-1 E` has eigenvalue one on its null space) and keeps the first
-/// iterate; against `A + E` it certifies in a step or two, on both paths.
 #[test]
 fn refinement_against_the_factored_matrix_converges() {
     let policy = RefinePolicy {
@@ -331,11 +318,6 @@ fn refinement_against_the_factored_matrix_converges() {
     assert!(own.certified && own.steps <= 2, "{own:?}");
 }
 
-/// The mixed-precision use: a single-precision factor with floors, refined
-/// in double precision against `A + E`, reaches double accuracy for the
-/// perturbed system (with floors that were not the factor's it would
-/// stagnate at their error); its floors are the low factor's, promoted.
-/// Against `A` it does not converge.
 #[test]
 fn mixed_precision_refines_against_the_factored_matrix() {
     let (n, r, c, v) = floored_saddle(false);

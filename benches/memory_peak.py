@@ -49,8 +49,6 @@ def measure(path, threads):
     numeric = {k: v for k, v in settings.items() if k != 'ordering'}
     b = np.ascontiguousarray(b)
     sym, analyze_peak, analyze_live = phase(lambda: rslab.analyze(a, path=route, **settings))
-    # The preflight: the plan before any numeric work (it may build the
-    # schedule, which then belongs to the analysis the factorization starts on).
     plan = sym.memory_plan(str(a.dtype), nrhs=b.shape[1], **numeric)
     analyzed_held = sym.heap_bytes
     factor, factor_peak, factor_live = phase(lambda: sym.factor(a, **numeric))
@@ -87,7 +85,6 @@ def main():
         with args.out.open('a') as out:
             out.write(json.dumps(row) + '\n')
         plan = row['plan']
-        # From the analysis on: the factorization, then a solve with the factor held.
         peak = row['analyzed_held'] + max(row['factor_peak'], row['factor_live'] + row['solve_peak'])
         pairs = [(peak, plan['peak_bytes']),
                  (row['factor_peak'], plan['factor_peak_bytes']),

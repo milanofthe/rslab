@@ -29,8 +29,6 @@ pub use rspool::{
 
 use crate::constants::COMPLEX_OPS;
 
-/// One `X` per scalar type of a kind of work: real and complex, double and
-/// single precision.
 #[derive(Debug)]
 pub(crate) struct PerScalar<X> {
     real: X,
@@ -39,11 +37,9 @@ pub(crate) struct PerScalar<X> {
     complex32: X,
 }
 
-/// One [`Rate`] per scalar type of a kind of work.
 pub(crate) type ScalarRates = PerScalar<Rate>;
 
 impl PerScalar<Rate> {
-    /// `prior` ns per real op, the complex priors [`COMPLEX_OPS`] times it.
     pub(crate) const fn new(prior: f32) -> Self {
         PerScalar {
             real: Rate::new(prior),
@@ -55,7 +51,6 @@ impl PerScalar<Rate> {
 }
 
 impl<X> PerScalar<X> {
-    /// The one of `T`.
     pub(crate) fn of<T: crate::scalar::Scalar>(&self) -> &X {
         let parts = if T::COMPLEX { 2 } else { 1 };
         let single = std::mem::size_of::<T>() < parts * std::mem::size_of::<f64>();
@@ -68,8 +63,6 @@ impl<X> PerScalar<X> {
     }
 }
 
-/// `f(i)` for every `i` in `0..n`, each its own piece (pieces of very
-/// unequal work, such as the walks of a task tree), `work` all of them.
 pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     match work.go::<Rayon>(n) {
         Go::Wide(k) => run_width(n, k, &f),
@@ -77,8 +70,6 @@ pub(crate) fn each(n: usize, work: Work<'_>, f: impl Fn(usize) + Sync + Send) {
     }
 }
 
-/// `f(i, &items[i], &mut scratch[i])` for every item and its scratch,
-/// `work` all of them.
 pub(crate) fn zip_mut<A: Sync, S: Send>(
     items: &[A],
     scratch: &mut [S],
@@ -93,8 +84,6 @@ pub(crate) fn zip_mut<A: Sync, S: Send>(
     });
 }
 
-/// `f(item)` for every item of `items`, consumed, in order, `work` all of
-/// them.
 pub(crate) fn map_owned<A: Send, R: Send>(
     items: Vec<A>,
     work: Work<'_>,
@@ -115,7 +104,6 @@ pub(crate) fn map_owned<A: Send, R: Send>(
         .collect()
 }
 
-/// `f(item)` for every item of `items`, consumed, `work` all of them.
 pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync + Send) {
     let mut slots: Vec<Option<A>> = items.into_iter().map(Some).collect();
     chunks_mut::<Rayon, _>(&mut slots, 1, work, |_, part| {
@@ -123,8 +111,6 @@ pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(
     });
 }
 
-/// `v` sorted by `key`, unstably: on rayon in parallel where `work` is
-/// worth it, else (and on a lent pool) on this thread.
 pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
     v: &mut [T],
     work: Work<'_>,
@@ -142,7 +128,6 @@ pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
     v.par_sort_unstable_by_key(key)
 }
 
-/// Whether `f(i)` holds for some `i` in `0..n`, `work` all of them.
 pub(crate) fn any(n: usize, work: Work<'_>, f: impl Fn(usize) -> bool + Sync + Send) -> bool {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     let found = AtomicBool::new(false);
@@ -160,8 +145,6 @@ pub(crate) fn any(n: usize, work: Work<'_>, f: impl Fn(usize) -> bool + Sync + S
     found.into_inner()
 }
 
-/// `a()` and `b()`, side by side where `work` (both) is worth it, else one
-/// after the other on this thread.
 pub(crate) fn join<A: Send, B: Send>(
     work: Work<'_>,
     a: impl FnOnce() -> A + Send,
@@ -173,11 +156,9 @@ pub(crate) fn join<A: Send, B: Send>(
     join_on(a, b)
 }
 
-/// [`join`] side by side.
 fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B + Send) -> (A, B) {
     match current() {
         Some(l) => {
-            // each side leaves its own sections half this thread's share
             let half = Some((share_of(l.pool.threads()) / 2).max(1));
             let (mut a, mut b) = (Some(a), Some(b));
             let (mut ra, mut rb) = (None, None);
@@ -198,20 +179,15 @@ fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B
                 _ => unreachable!("a pool runs every piece"),
             }
         }
+        // https://github.com/milanofthe/rslab/issues/292
         None => {
-            // each side leaves its sections the whole pool: rayon runs
-            // their pieces on free threads only, and halving it kept the
-            // threads a short side leaves behind from the long side's
             let (a, b) = (carried(a), carried(b));
             ::rayon::join(|| as_piece(None, None, a), || as_piece(None, None, b))
         }
     }
 }
 
-/// Run `f` where a parallel section is cheapest to start: on a worker of the
-/// pool (a rayon section injected from outside costs a wake per section, one
-/// started on a worker almost nothing), if `work` is worth a section at
-/// all; else here.
+// https://github.com/milanofthe/rslab/issues/292
 pub(crate) fn enter<R: Send>(work: f64, f: impl FnOnce() -> R + Send) -> R {
     if rspool::rayon::width(work, usize::MAX) < 2 {
         return f();
@@ -236,22 +212,17 @@ pub(crate) fn enter<R: Send>(work: f64, f: impl FnOnce() -> R + Send) -> R {
     }
 }
 
-/// A section whose tasks start tasks of their own ([`scope`]).
 pub(crate) struct Scope<'a, 's>(ScopeOn<'a, 's>);
 
-/// A task of a scope run on the calling thread.
 type HereTask<'s> = Box<dyn for<'b> FnOnce(&Scope<'b, 's>) + Send + 's>;
 
 enum ScopeOn<'a, 's> {
     Rayon(&'a ::rayon::Scope<'s>),
     Lent(&'a dyn Spawn<'s>, &'a Lent),
-    /// Not worth the pool: the tasks one after the other on the calling
-    /// thread, after the body.
     Here(&'a std::sync::Mutex<std::collections::VecDeque<HereTask<'s>>>),
 }
 
 impl<'a, 's> Scope<'a, 's> {
-    /// Start `f` as a task of the scope; the scope returns once it ran.
     pub(crate) fn spawn(&self, f: impl for<'b> FnOnce(&Scope<'b, 's>) + Send + 's) {
         match self.0 {
             ScopeOn::Rayon(sc) => {
@@ -272,10 +243,6 @@ impl<'a, 's> Scope<'a, 's> {
     }
 }
 
-/// Run `body` with a scope its tasks are started in, returning once every
-/// task ran: rayon's `scope`, or the lent pool's, where `work` (the body and
-/// its tasks) is worth more than one thread; else the tasks one after the
-/// other on this thread after the body, without touching the pool.
 pub(crate) fn scope<'s, R: Send>(
     work: Work<'_>,
     body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send + 's,
@@ -294,7 +261,6 @@ pub(crate) fn scope<'s, R: Send>(
     }
 }
 
-/// [`scope`] on the pool.
 fn scope_on<'s, R: Send>(body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send + 's) -> R {
     match current() {
         Some(l) => {
@@ -319,9 +285,6 @@ fn scope_on<'s, R: Send>(body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send +
     }
 }
 
-/// `f` under the calling thread's rsprobe node on whichever thread runs it:
-/// the scopes of work handed to another thread hang under the scope that
-/// handed it over, its time is `busy` there.
 pub(crate) fn carried<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R + Send {
     let node = rsprobe::current();
     move || {
@@ -330,10 +293,54 @@ pub(crate) fn carried<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R + S
     }
 }
 
-/// `m` locked: a lock is poisoned only by a panic, which its section
-/// carries on.
-fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) struct FreeTestPool {
+    threads: usize,
+    widest: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl FreeTestPool {
+    pub(crate) fn new(threads: usize) -> Self {
+        FreeTestPool {
+            threads,
+            widest: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn widest(&self) -> usize {
+        self.widest.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl Pool for FreeTestPool {
+    fn threads(&self) -> usize {
+        self.threads
+    }
+    fn dispatch(&self) -> Dispatch {
+        Dispatch::free(self.threads)
+    }
+    fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.widest.fetch_max(n, Relaxed);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..self.threads.min(n) {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    f(i);
+                });
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -387,7 +394,6 @@ mod tests {
             assert_eq!(away.load(Relaxed), 0, "tiny work left the thread");
             let v = map::<Rayon, _>(1000, Work::ns(1e9), |i| i * 2);
             assert!(v.iter().enumerate().all(|(i, &x)| x == 2 * i));
-            // large work at a rate goes wide and computes the same
             let r = Rate::new(1e6);
             let w = map::<Rayon, _>(1000, Work::of(1e9, &r), |i| i * 3);
             assert!(w.iter().enumerate().all(|(i, &x)| x == 3 * i));

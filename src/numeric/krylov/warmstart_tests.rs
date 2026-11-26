@@ -3,14 +3,10 @@ use crate::error::RslabError;
 use num_complex::Complex;
 type C = Complex<f64>;
 
-/// Warm start through the closure adapters: seeding `gmres_block` with the
-/// exact solution must converge immediately (0 iterations past the residual
-/// check), and with a perturbed seed in strictly fewer iterations than cold.
 #[test]
 fn closure_warm_start_converges_immediately() {
     let n = 40;
     let s = 2;
-    // Diagonally dominant complex system, closure matvec.
     let a = |i: usize, j: usize| -> C {
         if i == j {
             C::new(4.0 + i as f64 * 0.01, 0.5)
@@ -71,11 +67,8 @@ fn closure_warm_start_converges_immediately() {
     )
     .expect("warm");
     assert_eq!(warm.iters, 0, "exact seed must converge immediately");
-    for k in 0..n * s {
-        assert!((warm.x[k] - xs[k]).norm() < 1e-8);
-    }
+    assert_eq!(warm.x, xs);
 
-    // Perturbed seed: strictly fewer iterations than cold.
     let near: Vec<C> = xs.iter().map(|v| v * C::new(1.001, 0.0)).collect();
     let warm2 = gmres_block(
         &op,

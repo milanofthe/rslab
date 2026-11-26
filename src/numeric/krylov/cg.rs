@@ -38,7 +38,6 @@ where
     }
 
     let mut x = vec![T::zero(); n];
-    // r_0 = b - A x_0 = b (x_0 = 0).
     let mut r = b.to_vec();
     let bnorm = norm2(b);
     if bnorm == 0.0 {
@@ -54,17 +53,17 @@ where
     let mut z = vec![T::zero(); n];
     precond.apply(&r, &mut z)?;
     let mut p = z.clone();
-    let mut rho = dotu(&r, &z); // r^Tz, unconjugated
+    let mut rho = dotu(&r, &z);
     let mut q = vec![T::zero(); n];
 
     let mut final_res = norm2(&r) / bnorm;
     let mut converged = false;
     let mut iters = 0;
     while iters < max_iter {
-        op.apply(&p, &mut q); // q = A p
+        op.apply(&p, &mut q);
         let pq = dotu(&p, &q);
         if pq == T::zero() {
-            break; // breakdown
+            break;
         }
         let alpha = rho * pq.recip();
         for i in 0..n {
@@ -80,7 +79,7 @@ where
         precond.apply(&r, &mut z)?;
         let rho_new = dotu(&r, &z);
         if rho == T::zero() {
-            break; // breakdown
+            break;
         }
         let beta = rho_new * rho.recip();
         for i in 0..n {
@@ -89,8 +88,6 @@ where
         rho = rho_new;
     }
 
-    // Not converged with iterations left => the loop broke on a zero `p^TAp`/`r^Tz`
-    // denominator (breakdown); otherwise the budget was exhausted.
     let stop = stop_reason(converged, iters, max_iter);
     Ok(KrylovResult {
         x,
@@ -131,7 +128,7 @@ where
     }
 
     let mut x = vec![T::zero(); n];
-    let mut r = b.to_vec(); // r_0 = b (x_0 = 0)
+    let mut r = b.to_vec();
     let bnorm = norm2(b);
     if bnorm == 0.0 {
         return Ok(KrylovResult {
@@ -143,23 +140,23 @@ where
         });
     }
 
-    let mut z = vec![T::zero(); n]; // z = M^-1 r
+    let mut z = vec![T::zero(); n];
     precond.apply(&r, &mut z)?;
     let mut p = z.clone();
     let mut ap = vec![T::zero(); n];
-    op.apply(&p, &mut ap); // A p
-    let mut az = ap.clone(); // A z (= A p at init since p = z)
-    let mut gamma = dotu(&z, &az); // z^T A z
-    let mut w = vec![T::zero(); n]; // M^-1 A p
-    let mut aw = vec![T::zero(); n]; // A w
+    op.apply(&p, &mut ap);
+    let mut az = ap.clone();
+    let mut gamma = dotu(&z, &az);
+    let mut w = vec![T::zero(); n];
+    let mut aw = vec![T::zero(); n];
 
     let mut final_res = norm2(&r) / bnorm;
     let mut converged = false;
     let mut iters = 0;
     while iters < max_iter {
-        precond.apply(&ap, &mut w)?; // w = M^-1 A p
-        op.apply(&w, &mut aw); // A w
-        let denom = dotu(&ap, &w); // (A p)^T M^-1 (A p)
+        precond.apply(&ap, &mut w)?;
+        op.apply(&w, &mut aw);
+        let denom = dotu(&ap, &w);
         if denom == T::zero() {
             break;
         }
@@ -188,7 +185,6 @@ where
         gamma = gamma_new;
     }
 
-    // Same three-way classification as COCG (see [`stop_reason`]).
     let stop = stop_reason(converged, iters, max_iter);
     Ok(KrylovResult {
         x,

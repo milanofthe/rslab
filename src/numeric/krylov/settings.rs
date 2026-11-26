@@ -131,7 +131,6 @@ impl BlockBasis {
         }
     }
 
-    /// The bases a column stores: `V` and `Z` when flexible, `V` alone otherwise.
     fn bases(self) -> usize {
         if self.flexible {
             2
@@ -140,7 +139,6 @@ impl BlockBasis {
         }
     }
 
-    /// Bytes a step adds to the bases of a block GMRES column of length `n` in `T`.
     pub(crate) fn layer_bytes<T: Scalar>(self, n: usize) -> u64 {
         (n * self.bases() * Stored::<T>::scalar_bytes(self.single)) as u64
     }
@@ -223,8 +221,6 @@ impl KrylovSettings {
         }
     }
 
-    /// The restart of a block GMRES of `s` right-hand sides of length `n` in `T`,
-    /// its bases as stored at the start.
     pub(crate) fn block_restart<T: Scalar>(&self, n: usize, s: usize) -> usize {
         let b = self.basis();
         self.restart_for(n, s, Stored::<T>::scalar_bytes(b.single), b.bases())
@@ -257,8 +253,8 @@ impl KrylovSettings {
             match basis.lower::<T>(self.tol).filter(|_| self.downgrade) {
                 Some(b) => basis = b,
                 None => {
-                    // one column two vectors deep: its start and a step
-                    let column = (plan(basis, 2) - plan(basis, 0)) / s as u64;
+                    let start_and_one_step = 2;
+                    let column = (plan(basis, start_and_one_step) - plan(basis, 0)) / s as u64;
                     return plan(basis, depth).min(room.max(plan(basis, 0) + column));
                 }
             }
@@ -275,8 +271,6 @@ impl KrylovSettings {
         super::block::deflation_bytes::<T>(n, s, m, self.ortho_chunk, k)
     }
 
-    /// The restart length for `n` unknowns, `columns` right-hand sides of
-    /// `scalar_bytes` each and `bases` stored bases (two for flexible GMRES).
     pub(crate) fn restart_for(
         &self,
         n: usize,
@@ -305,14 +299,15 @@ impl KrylovSettings {
 mod tests {
     use super::KrylovSettings;
 
-    /// The default restart is the longest whose bases fit the budget,
-    /// within the bounds; an explicit one is kept.
     #[test]
     fn the_default_restart_fits_the_basis_budget() {
         let s = KrylovSettings::default();
         assert_eq!(s.restart_for(1000, 1, 16, 2), 80);
-        // 32 MB per basis vector: 33 fit into 1 GiB, one is the spare.
-        assert_eq!(s.restart_for(500_000, 2, 16, 2), 32);
+        let per_vector = 500_000 * 2 * 16 * 2;
+        assert_eq!(
+            s.restart_for(500_000, 2, 16, 2),
+            s.basis_budget_bytes / per_vector - 1
+        );
         assert_eq!(s.restart_for(50_000_000, 1, 16, 2), 20);
         assert_eq!(
             s.clone().with_restart(7).restart_for(50_000_000, 1, 16, 2),

@@ -52,3 +52,10 @@ pub const PROGRESS_STEPS: u64 = 100;
 /// Why: George-Liu terminates in a handful of hops; the cap is for safety.
 /// Contract: results (only where the search would run longer).
 pub const RCM_PERIPHERAL_MAX_HOPS: usize = 16;
+
+/// Denominator of the closed form of the sum of squares,
+/// `0^2 + 1^2 + ... + (f - 1)^2 = (f - 1) f (2 f - 1) / 6` (1).
+/// Used by: the flop counters of `quotient_graph::algo` (AMD and AMF).
+/// Why: the closed form of the sum.
+/// Contract: output (the flop counts, not the permutation).
+pub const SUM_OF_SQUARES_DIV: f64 = 6.0;

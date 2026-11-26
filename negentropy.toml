@@ -1,0 +1,37 @@
+markdown = ["python/docs/api.md"]
+
+[allow]
+environment = [
+    '^src/matgen/download\.rs: .*"RLA_MATGEN_CACHE"',
+    '^src/tuning\.rs: .*"RLA_CALIB_CACHE"',
+]
+print = ['^python/src/logging\.rs: .*eprintln!\("rslab \{\}", event\.line\(&path\)\)']
+unwrap = [
+    '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid symmetric triplets: \{e\}"\)',
+    '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid triplets: \{e\}"\)',
+    '^src/parallel\.rs: .*unreachable!\("every item is mapped"\)',
+    '^src/parallel\.rs: .*unreachable!\("a pool runs what it enters"\)',
+    '^src/parallel\.rs: .*unreachable!\("a pool runs the body of its scope"\)',
+]
+duplicate = [
+    '^python/src/symbolic\.rs: .*fn heap_bytes\(&self\) -> u64',
+    '^python/src/symbolic\.rs: .*fn estimate_memory\(&self, py: Python<..>, dtype: &str\) -> PyResult<PyObject>',
+    '^python/src/symbolic\.rs: .*fn memory_plan\($',
+    '^python/src/krylov\.rs: .*pub fn cocr_plain\($',
+    '^python/src/lib\.rs: .*fn grow\(bytes: usize\)',
+    '^examples/pool_bench\.rs: .*fn lu<T: Scalar>\(a: &GeneralCsc<T>, s: &SolverSettings, reps: usize\) -> f64',
+    '^src/io/mtx\.rs: .*pub fn to_general_csc\(&self\) -> Result<GeneralCsc<T>, RslabError>',
+    '^src/sparse/general\.rs: .*pub fn demoted\(&self\) -> GeneralCsc<T::Low>',
+    '^src/numeric/lu/node\.rs: .*pub\(super\) fn new\(\) -> Self',
+    '^src/numeric/settings\.rs: .*pub fn with_threads\(mut self, threads: impl Into<Threads>\) -> Self',
+    '^src/numeric/supernodal/solve\.rs: .*fn tri_up<T: Scalar>\($',
+    '^src/scalar\.rs: .*fn le_bytes\(self, out: &mut Vec<u8>\)',
+]
+test-bound = [
+    '^python/tests/test_api\.py: .*np\.linalg\.norm\(A @ r\.x - b\) / np\.linalg\.norm\(b\) < 1e-8',
+    '^src/numeric/krylov/tests\.rs: .*assert!\(res < 1e-7, "COCR residual \{\}", res\)',
+    '^src/numeric/krylov/tests\.rs: .*assert!\(res < 1e-6, "residual \{\}", res\)',
+    '^src/numeric/supernodal/solve/sparse\.rs: .*d <= 1e-13 \* \(1\.0 \+ y\[c0 \+ k\]\.norm\(\)\)',
+    '^tests/mixed_precision\.rs: .*assert!\(\(a - b\)\.norm\(\) <= 1e-5 \* scale\)',
+    '^tests/sparse_rhs\.rs: .*assert!\(d <= 1e-4, "near-singular port matrix differs by \{d:e\}"\)',
+]

@@ -22,9 +22,6 @@ use crate::sparse::general::GeneralCsc;
 use crate::symbolic::SymbolicFactorization;
 use std::sync::atomic::AtomicUsize;
 
-/// Fold the MC64 row matching back into the factors: pivot rows, the pivot
-/// floors and the row scaling are reported in `A`'s row indices, as the
-/// solves expect.
 fn finish_matching<T: Scalar>(fac: &mut LuNumeric<T>, lusym: &LuSymbolic) {
     if let Some(m) = &lusym.matching {
         for e in fac.perm_row.iter_mut() {
@@ -38,38 +35,20 @@ fn finish_matching<T: Scalar>(fac: &mut LuNumeric<T>, lusym: &LuSymbolic) {
 }
 
 pub(super) struct LlEmit<T> {
-    /// Number of consumers (ancestors that pull) still to come; freed at 0.
     pub(super) refcount: Vec<AtomicUsize>,
-    /// First elimination position of each supernode without delayed pivots
-    /// (symbolic prefix sum of ncol).
     pub(super) e_offset: Vec<usize>,
-    /// The factors' buffers: every supernode factors `L` and `U^T` straight
-    /// into its slots of `l_arena` and `u_arena`.
     pub(super) l_arena: PanelArena<T>,
     pub(super) u_arena: PanelArena<T>,
     pub(super) panels: Cells<(PanelOut, PanelOut)>,
-    /// What each factored supernode leaves (its pivots, those it delays).
     pub(super) pivots: Cells<NodePivots<T>>,
-    /// Whether pivots may be delayed (`delay`): the positions are then
-    /// known, and the supernodes emitted, only once the whole forest is
-    /// factored.
     pub(super) delays: bool,
-    /// A front found the arenas' room spent (the factorization stops).
     pub(super) overflowed: std::sync::atomic::AtomicBool,
-    /// `e_of_g[g]` = elimination position of COLUMN g; `row_pos_of_g[g]` =
-    /// position whose PIVOT ROW is g. Written by [`place`](Self::place)
-    /// (disjoint g), read in `emit_and_free`, after the join barrier or the
-    /// join chain that makes the consumers' writes visible.
     pub(super) e_of_g: Cells<usize>,
     pub(super) row_pos_of_g: Cells<usize>,
-    /// The pivot floors, `(supernode, pivot of the supernode, what the floor
-    /// added to the pivot)`, each node's pushed once it is factored.
     pub(super) floors: std::sync::Mutex<Vec<(usize, usize, T)>>,
 }
 
 impl<T: Scalar> LlEmit<T> {
-    /// The emit state, the arenas in `storage` (the buffers of an earlier
-    /// factor of this analysis) when given.
     fn new(
         sym: &SymbolicFactorization,
         sched: &LlSchedule,
@@ -85,11 +64,8 @@ impl<T: Scalar> LlEmit<T> {
         let (l_slots, u_slots) = lu_slots(sym, st);
         let allowance = delay_allowance(&l_slots, &u_slots, delay_growth);
         let (l_arena, u_arena) = match storage {
+            // https://github.com/milanofthe/rslab/issues/288
             _ if delays => {
-                // Slots claimed as the fronts start, of the size they have
-                // then, within the analysis's values and the allowance (an
-                // earlier factor's buffers go: their pages would stay
-                // resident).
                 drop(storage);
                 let room = |v: &[Slot]| v.iter().map(|&(v, _)| v).sum::<usize>() + allowance;
                 (
@@ -112,7 +88,6 @@ impl<T: Scalar> LlEmit<T> {
             l_arena,
             u_arena,
             panels: Cells::new_default(ns),
-            // An earlier factorization's records, their buffers filled again.
             pivots: if pivots.len() == ns {
                 pivots
             } else {
@@ -134,26 +109,19 @@ impl<T: Scalar> LlEmit<T> {
         *self.row_pos_of_g.get(g)
     }
 
-    /// Give supernode `s`'s pivots the elimination positions from `eoff` on:
-    /// the position maps of their columns and rows.
-    ///
-    /// # Safety
-    /// `s` is factored, its record visible, and nobody else places it.
     pub(super) unsafe fn place(&self, s: usize, eoff: usize) {
         let pv = self.pivots.get(s);
         for p in 0..pv.npiv {
             let (gc, gr) = (pv.cols[p] as usize, pv.rows[p] as usize);
+            debug_assert!(self.eg(gc) == usize::MAX && self.rg(gr) == usize::MAX);
             self.e_of_g.set(gc, eoff + p);
             self.row_pos_of_g.set(gr, eoff + p);
         }
     }
 }
 
-/// An arena slot: `(values, rows)`.
 pub(super) type Slot = (usize, usize);
 
-/// The arena slots `(values, rows)` of the `L` and `U^T` panels of every
-/// supernode of the structure `st`.
 pub(super) fn lu_slots(sym: &SymbolicFactorization, st: &LuStructure) -> (Vec<Slot>, Vec<Slot>) {
     use crate::numeric::supernodal::panel::slot_sizes;
     let ns = sym.supernodes.len();
@@ -167,11 +135,6 @@ pub(super) fn lu_slots(sym: &SymbolicFactorization, st: &LuStructure) -> (Vec<Sl
     )
 }
 
-/// The growth of the panels delayed pivots may cause under `opts`, a
-/// fraction of the analysis's: [`LU_DELAY_ALLOWANCE`] with delayed
-/// pivoting, else none.
-///
-/// [`LU_DELAY_ALLOWANCE`]: crate::constants::LU_DELAY_ALLOWANCE
 pub(super) fn delay_growth(opts: &SolverSettings) -> f64 {
     if opts.pivoting.delayed {
         crate::constants::LU_DELAY_ALLOWANCE
@@ -180,8 +143,6 @@ pub(super) fn delay_growth(opts: &SolverSettings) -> f64 {
     }
 }
 
-/// The values delayed pivots may add to the factor over its slots:
-/// `delay_growth` of the slots' values.
 pub(super) fn delay_allowance(l_slots: &[Slot], u_slots: &[Slot], delay_growth: f64) -> usize {
     let values: usize = l_slots.iter().chain(u_slots).map(|&(v, _)| v).sum();
     if delay_growth > 0.0 {
@@ -191,11 +152,6 @@ pub(super) fn delay_allowance(l_slots: &[Slot], u_slots: &[Slot], delay_growth: 
     }
 }
 
-/// Emit supernode `k` once its last updater is done (or, with delayed pivots,
-/// once the forest is): the `L` panel (`L` strictly below the diagonal, `U`'s
-/// diagonal on it) and the `U^T` panel, which the factorization wrote above
-/// the diagonal, become the factor's panels as they are, `U^T` with `U`'s
-/// diagonal. Both get their rows past the pivots in elimination order.
 fn emit_and_free<T: Scalar>(
     k: usize,
     emit: &LlEmit<T>,
@@ -203,15 +159,14 @@ fn emit_and_free<T: Scalar>(
     st: &LuStructure,
     finish: &ScratchPool<PanelScratch<T>>,
 ) {
-    // SAFETY (the slot and record accesses below): the owner of supernode
-    // `k` emits it exactly once, after its last updater has read the slots
-    // (refcount zero) or the forest is done; nobody reads them afterwards.
+    // SAFETY: the owner of supernode `k` emits it exactly once, after its
+    // last updater has read the slots (refcount zero) or after the forest is
+    // done, and nobody reads them afterwards.
     let pv = unsafe { emit.pivots.get(k) };
     let (npiv, ol, ou) = pv.off(st, k, sym.supernodes[k].ncol);
     if npiv == 0 {
         return;
     }
-    // `U`'s diagonal, on the `L` panel's.
     {
         use crate::numeric::supernodal::panel::Layout;
         let (ll, lu) = (Layout::new(npiv, ol.len()), Layout::new(npiv, ou.len()));
@@ -221,7 +176,6 @@ fn emit_and_free<T: Scalar>(
             ut[lu.at(p, p)] = lbuf[ll.at(p, p)];
         }
     }
-    // The rows past the pivots in elimination indices, into the arenas' row slots.
     let l_rows = unsafe { emit.l_arena.rows_mut(k) };
     for (r, &g) in l_rows.iter_mut().zip(ol) {
         *r = unsafe { emit.rg(g as usize) } as u32;
@@ -235,10 +189,6 @@ fn emit_and_free<T: Scalar>(
     unsafe { emit.panels.set(k, (l_out, u_out)) };
 }
 
-/// Supernodal left-looking LU into an `LuNumeric`. `inp` reads the equilibrated permuted matrix; `d_row`/`d_col`
-/// the equilibration carried into the result; `delay_growth` the growth of
-/// the factor delayed pivots may cause (`delay`). `None` when they would
-/// have caused more.
 #[allow(clippy::too_many_arguments)]
 fn factor_lu_left_looking<T: Scalar>(
     sym: &SymbolicFactorization,
@@ -255,7 +205,6 @@ fn factor_lu_left_looking<T: Scalar>(
 ) -> Result<Option<LuNumeric<T>>, RslabError> {
     let n = sym.n;
     let ns = sym.supernodes.len();
-    // The pivot records from the pool, put back when the factor is built.
     let mut records = pools.pivots.take();
     let emit = LlEmit::<T>::new(
         sym,
@@ -278,8 +227,8 @@ fn factor_lu_left_looking<T: Scalar>(
         return Ok(None);
     }
     forest?;
-    // SAFETY (the record reads below): the forest is factored, every record
-    // written and visible after its join.
+    // SAFETY: the forest is factored, and every record is written and
+    // visible after its join.
     let npiv = |s: usize| unsafe { emit.pivots.get(s) }.npiv;
     let mut e_offset = Vec::with_capacity(ns);
     let mut at = 0usize;
@@ -289,8 +238,6 @@ fn factor_lu_left_looking<T: Scalar>(
     }
     debug_assert_eq!(at, n, "every column pivoted once");
     if emit.delays {
-        // The positions follow from the pivots every supernode took; then
-        // every supernode is emitted.
         for (s, &eoff) in e_offset.iter().enumerate() {
             // SAFETY: each supernode placed once, after the forest.
             unsafe { emit.place(s, eoff) };
@@ -332,9 +279,6 @@ fn factor_lu_left_looking<T: Scalar>(
     let (ut, zeros_u) = u_arena.finish(n, widths.iter().copied(), |s| unsafe {
         std::mem::take(&mut panels.get_mut(s).1)
     });
-    // The factor is of `A_hat + Delta`, `A_hat = D_r A D_c` (`B`'s rows under
-    // a matching) and `Delta` diagonal in elimination order: of `A + E` with
-    // `E = D_r^-1 Delta D_c^-1` at each position's pivot row and column.
     let mut floors = floors.into_inner().unwrap_or_else(|e| e.into_inner());
     floors.sort_unstable_by_key(|&(s, k, _)| e_offset[s] + k);
     let floors = floors
@@ -366,12 +310,6 @@ fn factor_lu_left_looking<T: Scalar>(
     }))
 }
 
-/// PARDISO phases 2-3 for the general path: numeric LU reusing a [`LuSymbolic`],
-/// its fronts' panels free to grow by `delay_growth` for delayed pivots
-/// ([`delay_growth`] of the settings).
-/// `a` must share the analyzed pattern (`n`, `nnz`). `storage` holds the panel
-/// buffers of an earlier factor of the same analysis, filled again in place.
-#[allow(clippy::needless_range_loop)] // CSC column loops index col_ptr + scaling
 pub(crate) fn factor_general_lu_numeric<T: Scalar>(
     lusym: &LuSymbolic,
     a: &GeneralCsc<T>,
@@ -413,27 +351,16 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
         }
     };
 
-    // The assembly-tree levels are no longer needed: the driver is a
-    // work-stealing tree recursion, not a level-synchronous sweep.
     let (sym, _by_level) = lusym
         .symb
         .sym_and_levels()
         .ok_or_else(|| RslabError::InvalidInput("internal: empty symbolic".to_string()))?;
 
-    // Two-sided equilibration A_hat = D_r A D_c (`opts.scaling`: the one-pass
-    // default, the iterated Ruiz form or none; `scaling::twosided`). Tames the
-    // dynamic range (MoM near-field saddles span ten orders) so the LU factor,
-    // its threshold test and its static pivot floor work on unit-scale rows and
-    // columns; the solve undoes it transparently. Computed from the original
-    // (unpermuted) A. Under the MC64 row matching the matrix factored is its
-    // row-permuted form `B` (row `i` of `B` is row `row_of[i]` of `A`) with the
-    // matching's scalings, which already put every row and column maximum at
-    // one: the equilibration setting has nothing left to do there.
     let (d_row, d_col): (Vec<f64>, Vec<f64>) = match &lusym.matching {
         Some(m) => ((0..n).map(|i| m.r[m.row_of[i]]).collect(), m.c.clone()),
         None => {
             let _s = rsprobe::scope!("scale");
-            // on the factorization's workers (its sweeps run in parallel)
+            // https://github.com/milanofthe/rslab/issues/288
             let (r, c, steps) = opts.threads.run(
                 0,
                 |cap| cap,
@@ -446,27 +373,20 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
 
     let prog = lusym.input.get_or_init(|| {
         let _s = rsprobe::scope!(DEBUG, "input program");
-        // `A`'s row `r` is `B`'s row `b_row[r]`
         let b_row = lusym.matching.as_ref().map(|m| m.row_map());
         InputProgram::general(&a.col_ptr, &a.row_idx, b_row.as_deref(), sym)
     });
-    // The scaling by elimination index: entry `(g, c)` of `P^T B P` is `A`'s
-    // times `d_row[perm[g]] * d_col[perm[c]]` (`d_row` by `B`'s rows).
-    let (s_row, s_col): (Vec<f64>, Vec<f64>) =
+    let (d_row_elim, d_col_elim): (Vec<f64>, Vec<f64>) =
         sym.perm.iter().map(|&i| (d_row[i], d_col[i])).unzip();
-    // Worker stack sized to the assembly-tree depth (overflow-safe on deep chain
-    // trees), shared by both LU paths.
     let stack = crate::numeric::settings::stack_for_depth(
         crate::numeric::settings::supernode_tree_depth(sym),
     );
 
-    // Run in a scoped pool of `opts.threads` so concurrent solves don't
-    // oversubscribe.
     let mut fac = opts.threads.run(
         stack,
         |cap| crate::numeric::supernodal::analysis::recommend_threads_for_sym(&lusym.symb, cap),
         || {
-            let inp = Input::new(prog, &a.values, Some((&s_row, &s_col)));
+            let inp = Input::new(prog, &a.values, Some((&d_row_elim, &d_col_elim)));
             let sched = lusym
                 .symb
                 .ll_schedule()
@@ -492,9 +412,6 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
             match run(growth, storage)? {
                 Some(fac) => Ok(fac),
                 None => {
-                    // The delayed pivots would have grown the factor past
-                    // their allowance: the factor without them, every pivot
-                    // in its own front.
                     rsprobe::warn!(
                         "delayed pivots exceed their allowance ({growth}); factored without \
                          delays"

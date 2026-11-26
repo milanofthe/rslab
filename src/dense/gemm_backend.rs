@@ -9,8 +9,7 @@
 //! its interleaved complex microkernel reaches about 80% of the real
 //! kernel's flop rate, so a complex product is split into real products of
 //! the real and imaginary planes in the Gauss form ([`complex_gemm_3m`]:
-//! three real products of the same size, 6/8 of the direct flop count; the
-//! textbook four-product form [`complex_gemm_4m`] is kept for reference).
+//! three real products of the same size, 6/8 of the direct flop count).
 //! The split trades flops for memory traffic (the planes are copied), which
 //! pays on a compute-bound core and not on a bandwidth-bound machine, so
 //! products that run in parallel take the direct kernel; on a 102k-DOF
@@ -54,14 +53,11 @@ pub unsafe fn gemm<T: Scalar>(
     conj_rhs: bool,
     mode: GemmMode,
 ) {
-    // A parallel product on a lent pool: its columns in blocks, each the
-    // crate's parallel path on one thread. On a pool of one thread (a
-    // one-thread budget, `numeric::settings::in_scoped_pool`) the whole
-    // product on that path, as on a rayon pool of one: the blocks gave a
-    // complex factorization other bits than every other thread count
-    // (`tests/thread_determinism.rs`).
     let parallel = !matches!(mode.parallelism, gemm::Parallelism::None);
-    if parallel && crate::parallel::is_lent() && crate::parallel::threads() < 2 {
+    let on_lent_pool = parallel && crate::parallel::is_lent();
+    let on_one_thread_pool = on_lent_pool && crate::parallel::threads() < 2;
+    // https://github.com/milanofthe/rslab/issues/289
+    if on_one_thread_pool {
         let one = GemmMode {
             parallelism: gemm::Parallelism::Rayon(1),
             ..mode
@@ -71,7 +67,7 @@ pub unsafe fn gemm<T: Scalar>(
             alpha, beta, conj_dst, conj_lhs, conj_rhs, one,
         );
     }
-    if parallel && n >= 2 && crate::parallel::is_lent() {
+    if on_lent_pool && n >= 2 {
         let per = crate::constants::GEMM_PIECE_MIN_COLS;
         let one = GemmMode {
             parallelism: gemm::Parallelism::Rayon(1),
@@ -152,9 +148,6 @@ pub fn split_worthwhile(m: usize, n: usize, k: usize, conj: bool, min_ratio: usi
     !conj && m * n * k >= min_ratio * (m * k + k * n + m * n)
 }
 
-/// Real entries of the split planes a complex product of this shape takes
-/// from its thread's buffer: nonzero only for a sequential product that
-/// splits ([`complex_gemm`]). The memory plan's account of the buffer.
 pub(crate) fn split_plane_entries(
     m: usize,
     n: usize,
@@ -170,7 +163,6 @@ pub(crate) fn split_plane_entries(
     crate::constants::SPLIT_PLANES * (mt * k + k * nt + mt * nt)
 }
 
-/// Real plane scratch of one thread (grows to the largest tile seen).
 struct Planes<R> {
     buf: Vec<R>,
 }
@@ -195,13 +187,7 @@ pub trait SplitReal:
     fn one() -> Self;
     fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret;
 }
-/// Run `f` on the thread's plane buffer. The buffer is taken out of the
-/// thread-local for the duration (not borrowed): a parallel real product
-/// inside `f` lets rayon's work stealing run another split on this same
-/// thread, which then gets an empty buffer of its own instead of a
-/// re-entrant borrow. The larger of the two is kept afterwards, up to
-/// [`SCRATCH_KEEP`](crate::constants::SCRATCH_KEEP): the thread outlives the
-/// factorization in the pool its caller keeps.
+// https://github.com/milanofthe/rslab/issues/289
 fn with_taken<R: SplitReal, Ret>(
     cell: &'static std::thread::LocalKey<RefCell<Planes<R>>>,
     f: impl FnOnce(&mut Vec<R>) -> Ret,
@@ -217,41 +203,29 @@ fn with_taken<R: SplitReal, Ret>(
     });
     out
 }
-impl SplitReal for f64 {
-    fn zero() -> Self {
-        0.0
-    }
-    fn one() -> Self {
-        1.0
-    }
-    fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret {
-        with_taken(&PLANES_F64, f)
-    }
+macro_rules! split_real {
+    ($real:ty, $planes:ident) => {
+        impl SplitReal for $real {
+            fn zero() -> Self {
+                0.0
+            }
+            fn one() -> Self {
+                1.0
+            }
+            fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret {
+                with_taken(&$planes, f)
+            }
+        }
+    };
 }
-impl SplitReal for f32 {
-    fn zero() -> Self {
-        0.0
-    }
-    fn one() -> Self {
-        1.0
-    }
-    fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret {
-        with_taken(&PLANES_F32, f)
-    }
-}
+split_real!(f64, PLANES_F64);
+split_real!(f32, PLANES_F32);
 
-/// `a * b` for complex numbers over a [`SplitReal`] (no trait bound on the
-/// complex type needed).
 #[inline]
 fn cmul<R: SplitReal>(a: Complex<R>, b: Complex<R>) -> Complex<R> {
     Complex::new(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re)
 }
 
-/// Copy the real and imaginary parts of a strided `rows x cols` complex
-/// matrix into two column-major planes with leading dimension `rows`.
-///
-/// # Safety
-/// `src` with the strides must be a valid `rows x cols` matrix.
 unsafe fn split_planes<R: SplitReal>(
     src: *const Complex<R>,
     cs: isize,
@@ -275,8 +249,6 @@ unsafe fn split_planes<R: SplitReal>(
     }
 }
 
-/// Real product `dst := (read_dst ? alpha * dst : 0) + beta * lhs * rhs` on
-/// column-major planes.
 #[allow(clippy::too_many_arguments)]
 unsafe fn real_gemm<R: SplitReal>(
     m: usize,
@@ -313,11 +285,6 @@ unsafe fn real_gemm<R: SplitReal>(
     )
 }
 
-/// Write the product planes into the strided complex destination:
-/// `dst := (read_dst ? alpha * dst : 0) + beta * (pr + i pi)`.
-///
-/// # Safety
-/// `dst` with the strides must be a valid `m x n` matrix.
 #[allow(clippy::too_many_arguments)]
 unsafe fn combine<R: SplitReal>(
     m: usize,
@@ -343,98 +310,6 @@ unsafe fn combine<R: SplitReal>(
             };
         }
     }
-}
-
-/// The four-product form: `Cr = Ar Br - Ai Bi`, `Ci = Ar Bi + Ai Br`.
-///
-/// # Safety
-/// As `gemm::gemm`.
-#[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub unsafe fn complex_gemm_4m<R: SplitReal>(
-    m: usize,
-    n: usize,
-    k: usize,
-    dst: *mut Complex<R>,
-    dst_cs: isize,
-    dst_rs: isize,
-    read_dst: bool,
-    lhs: *const Complex<R>,
-    lhs_cs: isize,
-    lhs_rs: isize,
-    rhs: *const Complex<R>,
-    rhs_cs: isize,
-    rhs_rs: isize,
-    alpha: Complex<R>,
-    beta: Complex<R>,
-    parallelism: gemm::Parallelism,
-) {
-    R::with_planes(|buf| {
-        let (mk, kn, mn) = (m * k, k * n, m * n);
-        buf.clear();
-        buf.resize(2 * mk + 2 * kn + 2 * mn, R::zero());
-        let (ar, rest) = buf.split_at_mut(mk);
-        let (ai, rest) = rest.split_at_mut(mk);
-        let (br, rest) = rest.split_at_mut(kn);
-        let (bi, rest) = rest.split_at_mut(kn);
-        let (cr, ci) = rest.split_at_mut(mn);
-        split_planes(lhs, lhs_cs, lhs_rs, m, k, ar, ai);
-        split_planes(rhs, rhs_cs, rhs_rs, k, n, br, bi);
-        let (one, neg) = (R::one(), -R::one());
-        // Cr = Ar Br - Ai Bi
-        real_gemm(
-            m,
-            n,
-            k,
-            cr.as_mut_ptr(),
-            false,
-            ar.as_ptr(),
-            br.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        real_gemm(
-            m,
-            n,
-            k,
-            cr.as_mut_ptr(),
-            true,
-            ai.as_ptr(),
-            bi.as_ptr(),
-            one,
-            neg,
-            parallelism,
-        );
-        // Ci = Ar Bi + Ai Br
-        real_gemm(
-            m,
-            n,
-            k,
-            ci.as_mut_ptr(),
-            false,
-            ar.as_ptr(),
-            bi.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        real_gemm(
-            m,
-            n,
-            k,
-            ci.as_mut_ptr(),
-            true,
-            ai.as_ptr(),
-            br.as_ptr(),
-            one,
-            one,
-            parallelism,
-        );
-        combine(m, n, dst, dst_cs, dst_rs, read_dst, alpha, beta, |e| {
-            Complex::new(cr[e], ci[e])
-        });
-    })
 }
 
 /// The three-product (Gauss) form: `T1 = Ar Br`, `T2 = Ai Bi`,
@@ -468,7 +343,6 @@ pub unsafe fn complex_gemm_3m<R: SplitReal>(
         let (mt, nt) = (m.min(tile), n.min(tile));
         let planes = crate::constants::SPLIT_PLANES;
         let need = planes * (mt * k + k * nt + mt * nt);
-        // every plane is written in full before it is read: no clearing
         if buf.len() < need {
             buf.resize(need, R::zero());
         }
@@ -616,8 +490,6 @@ pub unsafe fn complex_gemm<R: SplitReal>(
     )
 }
 
-/// A pointer the column blocks of a split product share, each to its own
-/// columns.
 struct Ptr<T>(*mut T);
 impl<T> Clone for Ptr<T> {
     fn clone(&self) -> Self {
@@ -637,6 +509,7 @@ impl<T> Ptr<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::complex_gemm;
     use num_complex::Complex64;
 
     struct Rng(u64);
@@ -665,7 +538,6 @@ mod tests {
         let lhs: Vec<Complex64> = (0..m * k).map(|_| rng.c()).collect();
         let rhs: Vec<Complex64> = (0..k * n).map(|_| rng.c()).collect();
         let dst0: Vec<Complex64> = (0..m * n).map(|_| rng.c()).collect();
-        // lhs strides: column-major (cs = m, rs = 1) or row-major (cs = 1, rs = k)
         let (lcs, lrs) = if transposed_lhs {
             (1, k as isize)
         } else {
@@ -673,7 +545,6 @@ mod tests {
         };
         let mut direct = dst0.clone();
         let mut d3 = dst0.clone();
-        let mut d4 = dst0.clone();
         unsafe {
             gemm::gemm(
                 m,
@@ -715,38 +586,37 @@ mod tests {
                 gemm::Parallelism::None,
                 256,
             );
-            complex_gemm_4m(
-                m,
-                n,
-                k,
-                d4.as_mut_ptr(),
-                m as isize,
-                1,
-                read_dst,
-                lhs.as_ptr(),
-                lcs,
-                lrs,
-                rhs.as_ptr(),
-                k as isize,
-                1,
-                alpha,
-                beta,
-                gemm::Parallelism::None,
-            );
         }
-        let norm = direct.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-        for (name, got) in [("3m", &d3), ("4m", &d4)] {
-            let err = got
-                .iter()
-                .zip(&direct)
-                .map(|(a, b)| (a - b).norm_sqr())
-                .sum::<f64>()
-                .sqrt();
-            assert!(
-                err <= 1e-13 * (norm + 1.0),
-                "{name} m={m} n={n} k={k} read={read_dst} err {err:.3e} norm {norm:.3e}"
-            );
-        }
+        let split = |z: &Complex64| z.re.abs() + z.im.abs();
+        let allowed = (0..m * n)
+            .map(|q| {
+                let (i, j) = (q % m, q / m);
+                let product: f64 = (0..k)
+                    .map(|l| {
+                        let a = lhs[if transposed_lhs { i * k + l } else { l * m + i }];
+                        split(&a) * split(&rhs[j * k + l])
+                    })
+                    .sum();
+                let scale = if read_dst {
+                    alpha.norm() * dst0[q].norm()
+                } else {
+                    0.0
+                };
+                let entry = complex_gemm(k) * (scale + beta.norm() * product);
+                (entry + entry).powi(2)
+            })
+            .sum::<f64>()
+            .sqrt();
+        let err = d3
+            .iter()
+            .zip(&direct)
+            .map(|(a, b)| (a - b).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            err <= allowed,
+            "3m m={m} n={n} k={k} read={read_dst} err {err:.3e} bound {allowed:.3e}"
+        );
     }
 
     #[test]

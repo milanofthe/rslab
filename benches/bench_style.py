@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 
 GRAY = "#808080"
 
-# Canonical solver palette: key -> (label, color, marker).
 SOLVERS = {
     "default": ("RSLAB (fixed default cfg)", "#94a3b8", "x"),
     "auto": ("RSLAB (heuristic pick)", "#3b82f6", "o"),
@@ -28,10 +27,6 @@ SOLVERS = {
     "klu": ("RSLAB KLU", "#14b8a6", "p"),
 }
 
-# Named data colors for breakdown stages / estimate parts. The two grays are for
-# *neutral / reference* series (estimates, the analyze stage); the saturated
-# blue/cyan stay tied to the two RSLAB paths (LL / MF) so meaning is consistent
-# across figures. PURPLE is reserved for the `pc` solver only - never reused.
 BLUE = "#3b82f6"
 CYAN = "#06b6d4"
 AMBER = "#f59e0b"
@@ -39,8 +34,6 @@ GREEN = "#22c55e"
 RED = "#ef4444"
 PURPLE = "#a855f7"
 DARKGRAY = "#4b5563"
-# Sequential blue shades for several series of the *same* kind (e.g. example
-# matrices in one RSLAB plot) - reads as "all RSLAB", not as different solvers.
 BLUE_SHADES = ["#93c5fd", "#3b82f6", "#1d4ed8"]
 
 
@@ -101,7 +94,7 @@ def legend_below(fig, handles=None, labels=None, ax=None, ncol=None, fontsize=9)
         handles, labels = src.get_legend_handles_labels()
     n = len(labels)
     if ncol is None:
-        ncol = n if n <= 4 else (n + 1) // 2  # 2 rows past 4 entries
+        ncol = n if n <= 4 else (n + 1) // 2
     fig.tight_layout()
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.01),
                ncol=ncol, frameon=False, fontsize=fontsize, columnspacing=1.6,

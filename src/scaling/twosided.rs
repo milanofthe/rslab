@@ -38,8 +38,6 @@ use crate::sparse::general::GeneralCsc;
 
 use super::ScalingStrategy;
 
-/// The steps the iteration takes at most to bring maxima spread over a factor
-/// `spread` within `tol` of one, at the rate one half (see the module).
 fn steps_bound(spread: f64, tol: f64) -> usize {
     let ln_s = spread.ln();
     let ln_t = tol.ln_1p();
@@ -49,23 +47,15 @@ fn steps_bound(spread: f64, tol: f64) -> usize {
     (ln_s / ln_t).log2().ceil() as usize + 1
 }
 
-/// What a maximum costs per entry.
 static MAXIMA_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
-/// The row and column maxima of `diag(r) A diag(c)` (the first step, `r = c =
-/// 1`, reads `|a_ij|` exactly as the one-pass scaling always has). The columns
-/// in pieces of about equal entries on the pool, each piece its own row maxima,
-/// taken together after: a maximum does not depend on the order it is taken
-/// in, so the result is the same on any number of workers.
 fn maxima<T: Scalar>(a: &GeneralCsc<T>, r: &[f64], c: &[f64], rm: &mut [f64], cm: &mut [f64]) {
     let n = a.n;
     let nnz = a.col_ptr[n];
     let pieces = crate::parallel::threads()
         .min(nnz / crate::constants::EQUILIBRATION_PIECE_MIN_NNZ)
         .max(1);
-    // piece `p` is the columns from the first whose entries start at or after
-    // `p * nnz / pieces`
     let starts: Vec<usize> = (0..=pieces)
         .map(|p| a.col_ptr.partition_point(|&k| k < p * nnz / pieces).min(n))
         .collect();
@@ -102,14 +92,6 @@ fn maxima<T: Scalar>(a: &GeneralCsc<T>, r: &[f64], c: &[f64], rm: &mut [f64], cm
     }
 }
 
-/// The row and column scalings `(d_r, d_c)` of `a` under `strategy`: the
-/// [`OnePassInfNorm`](ScalingStrategy::OnePassInfNorm) step for every
-/// strategy but [`InfNorm`](ScalingStrategy::InfNorm) (iterated) and
-/// [`Identity`](ScalingStrategy::Identity) (ones); the symmetric strategies
-/// `Mc64Symmetric` and `External` have no two-sided meaning (the settings
-/// report them as ignored on the LU path). The iteration stops once every
-/// row and column maximum is within a factor `1 + tol` of one (`tol` at least
-/// [`INFNORM_TOL`](crate::constants::INFNORM_TOL)). Also the steps taken.
 pub(crate) fn equilibrate_general<T: Scalar>(
     a: &GeneralCsc<T>,
     strategy: &ScalingStrategy,
@@ -128,18 +110,17 @@ pub(crate) fn equilibrate_general<T: Scalar>(
     let mut steps = 0;
     loop {
         maxima(a, &r, &c, &mut rm, &mut cm);
-        // the largest factor between a maximum and one, on the log scale
-        let mut dev = 0.0f64;
+        let mut log_deviation = 0.0f64;
         for &m in rm.iter().chain(&cm) {
             if m > 0.0 && m.is_finite() {
-                dev = dev.max(m.ln().abs());
+                log_deviation = log_deviation.max(m.ln().abs());
             }
         }
-        if steps > 0 && dev <= ln_tol {
+        if steps > 0 && log_deviation <= ln_tol {
             break;
         }
         if steps == 0 && iterate {
-            bound = steps_bound(dev.exp(), tol);
+            bound = steps_bound(log_deviation.exp(), tol);
         }
         for (d, &m) in r.iter_mut().zip(&rm).chain(c.iter_mut().zip(&cm)) {
             if m > 0.0 {
@@ -182,24 +163,18 @@ mod tests {
         (rm, cm)
     }
 
-    /// The one step is the single Knight-Ruiz step on the unscaled matrix,
-    /// `1/sqrt(row max)` and `1/sqrt(column max)`, and leaves a row whose max
-    /// is small against its column's max below one.
     #[test]
     fn one_pass_is_one_step() {
-        // [[1, 1e6], [1e-2, 1]]
         let a = csc(2, &[&[(0, 1.0), (1, 1e-2)], &[(0, 1e6), (1, 1.0)]]);
         let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::OnePassInfNorm, 0.1);
         assert_eq!(steps, 1);
-        assert_eq!(r, vec![1e-3, 1.0]);
-        assert_eq!(c, vec![1.0, 1e-3]);
+        let small = 1.0 / a.values[2].sqrt();
+        assert_eq!(r, vec![small, 1.0]);
+        assert_eq!(c, vec![1.0, small]);
         let (rm, _) = maxima_of(&a, &r, &c);
-        assert!(rm[1] < 1e-1, "row 1 max {}", rm[1]);
+        assert_eq!(rm[1], a.values[1], "row 1 max {}", rm[1]);
     }
 
-    /// The iteration brings every row and column maximum within a factor
-    /// `1 + tol` of one, in no more steps than the rate one half allows, on a
-    /// saddle-like matrix whose couplings span ten orders.
     #[test]
     fn iterated_reaches_unit_maxima_within_the_bound() {
         let a = csc(
@@ -220,26 +195,21 @@ mod tests {
             let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::InfNorm, tol);
             let (rm, cm) = maxima_of(&a, &r, &c);
             for m in rm.iter().chain(&cm) {
-                assert!(
-                    m.ln().abs() <= tol.ln_1p() * (1.0 + 1e-12),
-                    "max {m} at {tol}"
-                );
+                assert!(m.ln().abs() <= tol.ln_1p(), "max {m} at {tol}");
             }
-            // the maxima converged (above) within the steps the rate one half allows
             assert!(steps <= steps_bound(spread, tol), "{steps} steps at {tol}");
         }
     }
 
-    /// A zero row has no maximum to equilibrate: it stays unscaled, the other
-    /// rows and the columns are balanced.
     #[test]
     fn zero_row_stays_unscaled() {
         let a = csc(3, &[&[(0, 1e4), (2, 1.0)], &[(0, 1e-3)], &[(2, 5.0)]]);
-        let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::InfNorm, 1e-8);
+        let tol = crate::constants::INFNORM_TOL;
+        let (r, c, steps) = equilibrate_general(&a, &ScalingStrategy::InfNorm, tol);
         assert_eq!(r[1], 1.0);
         assert!(steps >= 1);
         let (rm, _) = maxima_of(&a, &r, &c);
-        assert!((rm[0] - 1.0).abs() < 1e-6 && (rm[2] - 1.0).abs() < 1e-6);
+        assert!(rm[0].ln().abs() <= tol.ln_1p() && rm[2].ln().abs() <= tol.ln_1p());
     }
 
     #[test]

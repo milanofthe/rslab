@@ -6,9 +6,9 @@
 //! maximum edge weight (ties broken by lower vertex id). Visiting
 //! low-degree vertices first - the "sorted" in SHEM - keeps a leaf
 //! from being stranded when its sole neighbor is claimed by a
-//! higher-degree vertex. If the reduction ratio falls below the
-//! configured threshold (default 0.85 per METIS 5.2.0), a simple
-//! 2-hop fallback pairs unmatched vertices that share a common
+//! higher-degree vertex. If the coarse graph keeps more than the
+//! configured share of the vertices (default 0.85 per METIS 5.2.0), a
+//! simple 2-hop fallback pairs unmatched vertices that share a common
 //! neighbor. This keeps power-law-degree KKT graphs from stalling
 //! the coarsening pipeline.
 //!
@@ -61,17 +61,6 @@ pub fn coarsen_level(
     let mut match_: Vec<i32> = vec![UNMATCHED; n];
     let mut cmap: Vec<i32> = vec![-1; n];
 
-    // --- Pass 1: SHEM ---
-    // Sorted Heavy-Edge Matching: visit vertices in ascending degree
-    // order, breaking ties by the seeded random permutation. METIS
-    // Match_SHEM bucket-sorts the random permutation by degree so that
-    // low-degree vertices - which have the fewest matching options -
-    // are matched before their few neighbors are claimed by a
-    // higher-degree vertex. Plain shuffle order (HEM) strands those
-    // leaves as self-matches, inflating the coarse graph on the
-    // irregular / power-law inputs SHEM is meant for. `sort_by_key` is
-    // stable, so the random shuffle survives as the within-degree
-    // tie-break, preserving seed determinism.
     let mut order: Vec<i32> = (0..fine.nvtxs).collect();
     rng.shuffle(&mut order);
     order.sort_by_key(|&v| fine.xadj[v as usize + 1] - fine.xadj[v as usize]);
@@ -92,8 +81,6 @@ pub fn coarsen_level(
                 continue;
             }
             let w = fine.wgt(k);
-            // Tie-break: strictly greater weight wins; on ties pick
-            // the lower vertex id (matches METIS SHEM).
             if w > best_w || (w == best_w && (best < 0 || u < best)) {
                 best = u;
                 best_w = w;
@@ -105,22 +92,18 @@ pub fn coarsen_level(
             cmap[vu] = cnvtxs;
             cmap[best as usize] = cnvtxs;
         } else {
-            // No unmatched neighbor - self-match for now, may be
-            // revisited by 2-hop.
             match_[vu] = v;
             cmap[vu] = cnvtxs;
         }
         cnvtxs += 1;
     }
 
-    // --- Pass 2: 2-hop fallback, only if reduction is poor ---
     let reduction_ratio = cnvtxs as f64 / fine.nvtxs.max(1) as f64;
     if reduction_ratio > two_hop_threshold && fine.nvtxs >= crate::constants::TWO_HOP_MIN_VERTICES {
         counters.n_two_hop_fallbacks += 1;
         cnvtxs = two_hop_pass(fine, &mut match_, &mut cmap);
     }
 
-    // --- Contract ---
     let graph = contract(fine, &cmap, cnvtxs, parallel_min_edges);
     CoarseGraph { graph, cmap }
 }
@@ -137,8 +120,8 @@ pub fn coarsen(
 ) -> Result<Vec<CoarseGraph>, OrderingError> {
     let mut levels: Vec<CoarseGraph> = Vec::new();
     let mut prev_nvtxs = fine.nvtxs;
-    let mut cur: &Graph = fine;
     loop {
+        let cur = levels.last().map_or(fine, |level| &level.graph);
         crate::node_nd::stopped(opts)?;
         if cur.nvtxs <= opts.coarsen_floor as i32 {
             break;
@@ -155,12 +138,6 @@ pub fn coarsen(
         if new_nvtxs == 0
             || new_nvtxs as f64 > crate::constants::COARSEN_STALL_RATIO * prev_nvtxs as f64
         {
-            // Stalled: this level made <5% progress, so stop. Keep it
-            // only if it actually shrank, independent of whether earlier
-            // levels exist: a first level that genuinely shrank must not
-            // be discarded (that would return an empty hierarchy), and a
-            // zero-progress later level must not be pushed (that would
-            // break the strictly-decreasing-nvtxs invariant).
             if new_nvtxs > 0 && new_nvtxs < prev_nvtxs {
                 levels.push(level);
             }
@@ -168,23 +145,16 @@ pub fn coarsen(
         }
         prev_nvtxs = new_nvtxs;
         levels.push(level);
-        cur = &levels.last().expect("just pushed").graph;
     }
     Ok(levels)
 }
 
-/// 2-hop matching pass: revisit self-matched vertices and pair them
-/// with another self-matched vertex that shares a common neighbor.
-/// Rebuilds `cmap` and returns the new `cnvtxs`.
 fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
     for v in 0..fine.nvtxs {
         let vu = v as usize;
         if match_[vu] != v {
-            // Already paired in SHEM or a previous 2-hop step.
             continue;
         }
-        // Look for a 2-hop partner: neighbor of a neighbor that is
-        // currently self-matched.
         let lo = fine.xadj[vu] as usize;
         let hi = fine.xadj[vu + 1] as usize;
         let mut partner: i32 = -1;
@@ -208,7 +178,6 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
         }
     }
 
-    // Rebuild cmap contiguous from the (possibly updated) match_.
     cmap.iter_mut().for_each(|c| *c = -1);
     let mut cnvtxs: i32 = 0;
     for v in 0..fine.nvtxs {
@@ -226,16 +195,14 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
     cnvtxs
 }
 
-/// Build the coarse graph from a fine graph and a fine-to-coarse map.
+// https://github.com/milanofthe/rslab/issues/291
 fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) -> Graph {
     let cn = cnvtxs as usize;
     let n = fine.nvtxs as usize;
-    // Accumulate vertex weights.
     let mut vwgt: Vec<i32> = vec![0; cn];
     for v in 0..n {
         vwgt[cmap[v] as usize] = vwgt[cmap[v] as usize].saturating_add(fine.vwgt[v]);
     }
-    // Group fine vertices by coarse id to avoid rescans.
     let mut head: Vec<i32> = vec![-1; cn];
     let mut next: Vec<i32> = vec![-1; n];
     for v in 0..n {
@@ -243,13 +210,7 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
         next[v] = head[c];
         head[c] = v as i32;
     }
-    // The adjacency of coarse vertices `c0..c1`, one coarse vertex at a time
-    // with an edge-weight marker, written to `adj`/`wgt` from their start;
-    // returns each vertex's end offset and the entries written. `slot[cu]`
-    // holds the tag (the coarse vertex being contracted) and the accumulated
-    // weight side by side; it needs no reset between calls: its tags are
-    // coarse ids, and each is contracted exactly once.
-    let range = |(slot, touched): &mut (Vec<[i32; 2]>, Vec<i32>),
+    let block = |(slot, touched): &mut (Vec<[i32; 2]>, Vec<i32>),
                  (c0, c1, adj, wgt): (usize, usize, &mut [i32], &mut [i32])| {
         let mut ends = Vec::with_capacity(c1 - c0);
         let mut len = 0;
@@ -264,7 +225,6 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
                     let nbr = fine.adjncy[k];
                     let cn2 = cmap[nbr as usize];
                     if cn2 == c as i32 {
-                        // self-loop after contraction - drop
                         continue;
                     }
                     let sl = &mut slot[cn2 as usize];
@@ -287,13 +247,6 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
         (ends, len)
     };
 
-    // Coarse vertices are independent, so large levels contract in parallel
-    // blocks, the outputs concatenated in order: the coarse graph is the same
-    // as the serial loop's, whatever the thread count. On the top levels of a
-    // large nested dissection this was most of the coarsening time. A
-    // block's fine degree sum bounds its coarse edges, so every block writes
-    // into its own range of one buffer of the fine graph's size, and the
-    // ranges then close up in place: the level never holds its edges twice.
     let blocks = if fine.adjncy.len() >= parallel_min_edges && rayon::current_num_threads() > 1 {
         (crate::constants::FINE_PIECES_PER_WORKER * rayon::current_num_threads()).min(cn)
     } else {
@@ -327,10 +280,10 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
     let init = || (vec![[-1i32, 0]; cn], Vec::new());
     let parts: Vec<(Vec<usize>, usize)> = if blocks <= 1 {
         let mut state = init();
-        pieces.into_iter().map(|p| range(&mut state, p)).collect()
+        pieces.into_iter().map(|p| block(&mut state, p)).collect()
     } else {
         use rayon::prelude::*;
-        pieces.into_par_iter().map_init(init, range).collect()
+        pieces.into_par_iter().map_init(init, block).collect()
     };
     let mut xadj: Vec<i32> = Vec::with_capacity(cn + 1);
     xadj.push(0);
@@ -358,38 +311,12 @@ fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patterns::csc_from_triples;
+    use crate::tests::grid;
     use rslab_ordering_core::CscPattern;
-    use std::collections::BTreeSet;
-
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
 
     #[test]
     fn parallel_contract_matches_serial() {
-        // A 500 x 500 grid has ~1M directed edges, above the parallel
-        // threshold; contracting it in a 1-thread and a 4-thread pool must
-        // give the same coarse graph, entry for entry.
         let g = grid(500, 500);
         assert!(g.adjncy.len() >= 200_000);
         let level = |threads: usize| {
@@ -411,27 +338,6 @@ mod tests {
         assert_eq!(a.graph.vwgt, b.graph.vwgt);
     }
 
-    fn grid(m: usize, n: usize) -> Graph {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        let (cp, ri) = csc_from_triples(total, &t);
-        let pat = CscPattern::new(total, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
-    }
-
     fn tridiag(n: usize) -> Graph {
         let mut t = Vec::new();
         for i in 0..n {
@@ -450,11 +356,9 @@ mod tests {
         for &c in &cg.cmap {
             assert!(c >= 0 && c < cg.graph.nvtxs, "cmap entry OOB: {}", c);
         }
-        // Vertex weight conservation.
         let fine_total: i64 = fine.vwgt.iter().map(|&x| x as i64).sum();
         let coarse_total: i64 = cg.graph.vwgt.iter().map(|&x| x as i64).sum();
         assert_eq!(fine_total, coarse_total, "vwgt conservation");
-        // No self-loops in coarse graph.
         for v in 0..cg.graph.nvtxs {
             let lo = cg.graph.xadj[v as usize] as usize;
             let hi = cg.graph.xadj[(v + 1) as usize] as usize;
@@ -462,7 +366,6 @@ mod tests {
                 assert_ne!(u, v, "self-loop in coarse graph at {}", v);
             }
         }
-        // Structural symmetry.
         for v in 0..cg.graph.nvtxs {
             let lo = cg.graph.xadj[v as usize] as usize;
             let hi = cg.graph.xadj[(v + 1) as usize] as usize;
@@ -486,7 +389,6 @@ mod tests {
         let mut ctr = CoarsenCounters::default();
         let cg = coarsen_level(&g, &mut rng, 0.85, 200_000, &mut ctr);
         assert_valid_coarse(&g, &cg);
-        // On a 2D grid SHEM should pair ~half the vertices.
         assert!(
             cg.graph.nvtxs < g.nvtxs,
             "coarse graph must shrink (was {}, now {})",
@@ -503,16 +405,6 @@ mod tests {
 
     #[test]
     fn shem_matches_low_degree_before_hub() {
-        // Chorded path 0-1-2-3 plus the extra edge 0-2. Degrees:
-        // 0:2, 1:2, 2:3 (hub), 3:1 (leaf). Plain heavy-edge matching
-        // in shuffle order (seed 1 visits the hub 2 first) pairs
-        // 2<->0, stranding both the leaf 3 and vertex 1 as
-        // self-matches -> 3 coarse vertices. Sorted heavy-edge
-        // matching (SHEM) visits the degree-1 leaf 3 first, pairing
-        // 3<->2, then 0<->1 -> 2 coarse vertices. Ascending-degree
-        // visitation is the defining property of METIS Match_SHEM
-        // (Karypis & Kumar Sec. 3.1); plain shuffle order is HEM,
-        // not the advertised SHEM.
         let t = [
             (0, 0),
             (1, 1),
@@ -584,8 +476,6 @@ mod tests {
             );
             prev = lvl.graph.nvtxs;
         }
-        // Coarsest level is at or below floor (the loop stops on
-        // the first level whose vertex count dips below floor).
         assert!(
             prev <= opts.coarsen_floor as i32
                 || levels.last().expect("non-empty").graph.nvtxs < g.nvtxs
@@ -594,14 +484,6 @@ mod tests {
 
     #[test]
     fn stall_keeps_first_level_that_shrank() {
-        // Star K_{1,24}: center 0 with 24 degree-1 leaves. SHEM matches
-        // exactly one leaf to the center, leaving 23 self-matched
-        // leaves, so the first level coarsens 25 -> 24 -- a real shrink
-        // that still trips the <5% "stall" branch. The two-hop fallback
-        // is disabled (threshold > 1) so nothing rescues the leaves and
-        // the stall branch is the only exit. The level genuinely shrank
-        // and must be kept even though `levels` is still empty;
-        // dropping it would return an empty hierarchy.
         let mut t: Vec<(usize, usize)> = vec![(0, 0)];
         for l in 1..=24usize {
             t.push((l, l));
@@ -627,10 +509,6 @@ mod tests {
 
     #[test]
     fn contract_sums_parallel_edges() {
-        // Two triangles sharing an edge: 0-1-2, 3-1-2. After
-        // matching 0<->3, coarse edges {{0,3}, 1} and {{0,3}, 2}
-        // should each have weight 2 (two fine edges collapse).
-        // Build the pattern manually.
         let n = 4;
         let t = [
             (0, 0),
@@ -646,11 +524,8 @@ mod tests {
         let (cp, ri) = csc_from_triples(n, &t);
         let pat = CscPattern::new(n, &cp, &ri).unwrap();
         let fine = Graph::from_csc_pattern(&pat).unwrap();
-        // Force a matching 0<->3 by custom cmap.
         let cmap: Vec<i32> = vec![0, 1, 2, 0];
         let coarse = contract(&fine, &cmap, 3, 200_000);
-        // Coarse vertex 0 = {0,3}: weight 2 to coarse vertex 1 (via
-        // 0-1 and 3-1), weight 2 to coarse vertex 2.
         let mut got: Vec<(i32, i32)> = Vec::new();
         let lo = coarse.xadj[0] as usize;
         let hi = coarse.xadj[1] as usize;
@@ -659,7 +534,6 @@ mod tests {
         }
         got.sort();
         assert_eq!(got, vec![(1, 2), (2, 2)]);
-        // Symmetry.
         for v in 0..coarse.nvtxs {
             let lo = coarse.xadj[v as usize] as usize;
             let hi = coarse.xadj[(v + 1) as usize] as usize;

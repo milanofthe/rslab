@@ -5,9 +5,6 @@ use crate::numeric::supernodal::panel::PanelFactor;
 use crate::refine::PivotFloor;
 use crate::scalar::Scalar;
 
-/// Everything of `P_r^T A P = L U` except the panels: the permutations, the
-/// equilibration and the outcome, `perm[e]` mapping factorization position
-/// `e` to the original index.
 #[derive(Clone)]
 pub(crate) struct LuPivots<T> {
     pub n: usize,
@@ -29,8 +26,6 @@ pub(crate) struct LuPivots<T> {
 }
 
 impl<T> LuPivots<T> {
-    /// Heap bytes held: the permutations, the scalings, the supernode tree
-    /// and the pivot floors.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.perm)
@@ -42,10 +37,6 @@ impl<T> LuPivots<T> {
     }
 }
 
-/// The numeric result of a sparse LU factorization: the unit lower `L` and
-/// the transposed upper factor `U^T` (its diagonal in the panel) in
-/// supernodal panel form (the storage the solves run on, written by the
-/// drivers without a copy), the permutations, the scalings and the outcome.
 pub(crate) struct LuNumeric<T> {
     /// `L` in panel form, in elimination order (unit diagonal implicit).
     pub l: PanelFactor<T>,
@@ -80,19 +71,14 @@ pub(crate) struct LuNumeric<T> {
 }
 
 impl<T: Scalar> LuNumeric<T> {
-    /// Stored fill `nnz(L) + nnz(U)`: the structural panel entries minus the
-    /// slots holding an exact zero.
     pub(crate) fn factor_nnz(&self) -> usize {
         self.l.nnz() + self.ut.nnz() - self.n_zeros
     }
 
-    /// Bytes of the two panel factors.
     pub(crate) fn bytes(&self) -> usize {
         self.l.bytes() + self.ut.bytes()
     }
 
-    /// Split into the two panel factors and the [`LuPivots`] the solver
-    /// keeps next to them.
     pub(crate) fn into_parts(self) -> (PanelFactor<T>, PanelFactor<T>, LuPivots<T>) {
         let pivots = LuPivots {
             n: self.l.n,

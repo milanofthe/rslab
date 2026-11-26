@@ -2,8 +2,6 @@
 
 use crate::numeric::settings::KernelSettings;
 
-/// [`KernelSettings`] plus the pivot threshold and the interrupt flag,
-/// threaded by value into the dense kernels.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KernelTuning<'a> {
     pub k: KernelSettings,
@@ -29,8 +27,30 @@ impl KernelTuning<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_constants::{solve_backward_error, UC64};
     use crate::{CscMatrix, KernelSettings, LdltSolver, SolverSettings};
     use num_complex::Complex;
+
+    fn inf_norm(v: &[Complex<f64>]) -> f64 {
+        v.iter().map(|z| z.norm()).fold(0.0, f64::max)
+    }
+
+    fn row_sums(a: &CscMatrix<Complex<f64>>) -> Vec<Complex<f64>> {
+        let mut abs = a.clone();
+        abs.values
+            .iter_mut()
+            .for_each(|v| *v = Complex::new(v.norm(), 0.0));
+        let mut sums = vec![Complex::new(0.0, 0.0); a.n];
+        abs.symv(&vec![Complex::new(1.0, 0.0); a.n], &mut sums);
+        sums
+    }
+
+    fn backward_error(a: &CscMatrix<Complex<f64>>, x: &[Complex<f64>], b: &[Complex<f64>]) -> f64 {
+        let mut ax = vec![Complex::new(0.0, 0.0); a.n];
+        a.symv(x, &mut ax);
+        let r: Vec<Complex<f64>> = ax.iter().zip(b).map(|(p, q)| p - q).collect();
+        inf_norm(&r) / (inf_norm(&row_sums(a)) * inf_norm(x) + inf_norm(b))
+    }
 
     fn helmholtz(m: usize) -> (CscMatrix<Complex<f64>>, Vec<Complex<f64>>) {
         let c = |re, im| Complex::new(re, im);
@@ -59,13 +79,8 @@ mod tests {
         (a, b)
     }
 
-    /// Moving the per-call thresholds changes only the serial/parallel and
-    /// scalar/GEMM kernel selection - never the answer. Factor the same matrix
-    /// under all-scalar/serial, all-GEMM/parallel, and the default, and confirm
-    /// the solutions agree to working precision. No global state, so this is a
-    /// pure per-call comparison (no serializing guard needed).
     #[test]
-    fn thresholds_do_not_change_the_result() {
+    fn scalar_serial_and_gemm_parallel_kernels_solve_alike() {
         let (a, b) = helmholtz(10);
         let solve = |s: &SolverSettings| LdltSolver::factor(&a, s).unwrap().solve(&b).unwrap();
 
@@ -79,45 +94,50 @@ mod tests {
             },
             ..SolverSettings::default().with_threads(0)
         });
-        let x_par = solve(&SolverSettings {
-            kernels: KernelSettings {
-                scalar_gate: 0,
-                par_gemm: 0,
-                par_cdiv: 0,
-                ..Default::default()
+        let pool = std::sync::Arc::new(crate::parallel::FreeTestPool::new(4));
+        let x_par = crate::parallel::install(
+            pool.clone() as std::sync::Arc<dyn crate::parallel::Pool>,
+            || {
+                solve(&SolverSettings {
+                    kernels: KernelSettings {
+                        scalar_gate: 0,
+                        par_gemm: 0,
+                        par_cdiv: 0,
+                        fork_min_flops: 0,
+                        ..Default::default()
+                    },
+                    ..SolverSettings::default().with_threads(0)
+                })
             },
-            ..SolverSettings::default().with_threads(0)
-        });
-        for i in 0..x_def.len() {
-            assert!(
-                (x_def[i] - x_scalar[i]).norm() < 1e-9,
-                "scalar path diverged at {i}"
-            );
-            assert!(
-                (x_def[i] - x_par[i]).norm() < 1e-9,
-                "parallel path diverged at {i}"
-            );
+        );
+        assert!(
+            pool.widest() > 1,
+            "the parallel path ran on {} threads",
+            pool.widest()
+        );
+        let bound = solve_backward_error(a.n, UC64);
+        for (name, x) in [
+            ("default", &x_def),
+            ("scalar", &x_scalar),
+            ("parallel", &x_par),
+        ] {
+            let omega = backward_error(&a, x, &b);
+            assert!(omega <= bound, "{name} path: backward error {omega:e}");
         }
     }
 
-    /// The panel width changes the pivot sequence (a different but valid factor),
-    /// so the factor is not bit-identical across NB - but every width must still
-    /// produce a correct solve.
     #[test]
-    fn panel_nb_preserves_correctness() {
+    fn every_panel_width_gives_a_backward_stable_solve() {
         let (a, b) = helmholtz(9);
-        for nb in [16usize, 32, 64, 100, 200] {
+        for nb in [8usize, 12, 16, 64] {
             let mut s = SolverSettings::default();
             s.kernels.panel_nb = nb;
             let x = LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap();
-            let mut ax = vec![Complex::new(0.0, 0.0); a.n];
-            a.symv(&x, &mut ax);
-            let res: f64 = (0..a.n)
-                .map(|i| (ax[i] - b[i]).norm_sqr())
-                .sum::<f64>()
-                .sqrt()
-                / b.iter().map(|v| v.norm_sqr()).sum::<f64>().sqrt();
-            assert!(res < 1e-9, "NB={nb} residual {res:.2e}");
+            let omega = backward_error(&a, &x, &b);
+            assert!(
+                omega <= solve_backward_error(a.n, UC64),
+                "NB={nb} backward error {omega:.2e}"
+            );
         }
     }
 }

@@ -72,15 +72,13 @@ impl Graph {
             let mut last: i32 = -1;
             for &r in &pattern.row_idx[lo..hi] {
                 if r == jj {
-                    // drop diagonal
                     continue;
                 }
                 if r < 0 || r >= nvtxs {
                     return Err(OrderingError::MalformedInput);
                 }
+                debug_assert!(r >= last);
                 if r == last {
-                    // drop duplicate; rows are sorted (CscPattern::new enforces
-                    // it), so duplicates are adjacent and this catches them all
                     continue;
                 }
                 adjncy.push(r);
@@ -132,50 +130,12 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
-
-    // -- small pattern generators (full symmetric, diagonal included) --
-
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = Vec::with_capacity(n + 1);
-        col_ptr.push(0);
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
+    use crate::patterns::{arrow, csc_from_triples, grid_2d};
 
     fn diag(n: usize) -> (Vec<i32>, Vec<i32>) {
         let mut t = Vec::new();
         for i in 0..n {
             t.push((i, i));
-        }
-        csc_from_triples(n, &t)
-    }
-
-    fn arrow(n: usize) -> (Vec<i32>, Vec<i32>) {
-        let mut t = Vec::new();
-        for i in 0..n {
-            t.push((i, i));
-        }
-        for i in 1..n {
-            t.push((0, i));
         }
         csc_from_triples(n, &t)
     }
@@ -190,27 +150,6 @@ mod tests {
         }
         csc_from_triples(n, &t)
     }
-
-    fn grid_2d(m: usize, n: usize) -> (Vec<i32>, Vec<i32>) {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        csc_from_triples(total, &t)
-    }
-
-    // -- invariant helpers --
 
     fn assert_graph_invariants(g: &Graph) {
         assert_eq!(g.xadj.len(), g.nvtxs as usize + 1, "xadj length");
@@ -231,13 +170,11 @@ mod tests {
         for (i, &r) in g.adjncy.iter().enumerate() {
             assert!(r >= 0 && r < g.nvtxs, "adjncy[{}]={} OOB", i, r);
         }
-        // No self-loops.
         for v in 0..g.nvtxs {
             for &u in g.neighbors(v) {
                 assert_ne!(u, v, "self-loop at {}", v);
             }
         }
-        // Structural symmetry: every edge (u,v) has a matching (v,u).
         for v in 0..g.nvtxs {
             for &u in g.neighbors(v) {
                 assert!(
@@ -248,11 +185,8 @@ mod tests {
                 );
             }
         }
-        // adjncy length is 2 * |E| because every edge appears twice.
         assert_eq!(g.nedges() * 2, g.adjncy.len(), "edge-count parity");
     }
-
-    // -- tests --
 
     #[test]
     fn diag_has_no_edges() {
@@ -269,7 +203,6 @@ mod tests {
 
     #[test]
     fn arrow_5_degree_sequence() {
-        // Arrow(5): hub 0 connects to {1,2,3,4}; leaves each connect only to 0.
         let (cp, ri) = arrow(5);
         let pat = CscPattern::new(5, &cp, &ri).unwrap();
         let g = Graph::from_csc_pattern(&pat).unwrap();
@@ -288,7 +221,6 @@ mod tests {
 
     #[test]
     fn tridiag_10_degree_sequence() {
-        // Tridiagonal(10): endpoints have degree 1, interiors degree 2.
         let (cp, ri) = tridiag(10);
         let pat = CscPattern::new(10, &cp, &ri).unwrap();
         let g = Graph::from_csc_pattern(&pat).unwrap();
@@ -304,7 +236,6 @@ mod tests {
 
     #[test]
     fn grid_3x3_structure() {
-        // 3x3 grid: corners=2, edges=3, center=4. Edges = 12.
         let (cp, ri) = grid_2d(3, 3);
         let pat = CscPattern::new(9, &cp, &ri).unwrap();
         let g = Graph::from_csc_pattern(&pat).unwrap();
@@ -331,7 +262,6 @@ mod tests {
 
     #[test]
     fn empty_graph_is_legal() {
-        // n=0: no columns. Graph has zero vertices and zero edges.
         let cp: Vec<i32> = vec![0];
         let ri: Vec<i32> = vec![];
         let pat = CscPattern::new(0, &cp, &ri).unwrap();
@@ -343,9 +273,8 @@ mod tests {
 
     #[test]
     fn diagonal_entries_are_dropped() {
-        // Diagonal-only pattern results in zero edges even though nnz > 0.
         let (cp, ri) = diag(3);
-        assert_eq!(ri.len(), 3); // three diagonal entries
+        assert_eq!(ri.len(), 3);
         let pat = CscPattern::new(3, &cp, &ri).unwrap();
         let g = Graph::from_csc_pattern(&pat).unwrap();
         assert_eq!(g.adjncy.len(), 0);

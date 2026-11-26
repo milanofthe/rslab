@@ -19,7 +19,6 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Probe the machine and return its (cached) calibration.
 fn calibration() -> (HardwareInfo, Calibration) {
     let hw = HardwareInfo::probe();
     let calib = Calibration::load_or_measure(&hw);

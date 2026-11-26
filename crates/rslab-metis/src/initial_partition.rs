@@ -48,6 +48,7 @@ pub fn part_weight(graph: &Graph, labels: &[u8], p: u8) -> i64 {
     s
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 /// GGP trial. Grows part 0 from a random seed until its weight
 /// reaches `target_a`. All unvisited vertices go to part 1.
 pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> Vec<u8> {
@@ -60,26 +61,12 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
     labels[seed] = PART_A;
     let mut a_weight: i64 = graph.vwgt[seed] as i64;
 
-    // GGP gain of pulling a boundary vertex v (still in B) into A is
-    //   (edges to A) - (edges to B),
-    // i.e. the reduction in cut. Since every neighbour of an in-B
-    // vertex is in A or B, edges_to_B(v) = wtot[v] - edges_to_A(v), so
-    // the gain equals 2*edges_to_A(v) - wtot[v]. We accumulate the
-    // edges-to-A term in `gain` and apply the `- wtot` correction in
-    // the selection scan below; selecting on edges-to-A alone would
-    // bias toward high-degree vertices and inflate the cut.
-    //
-    // No full PQ: pick the max-gain vertex via a linear scan over the
-    // boundary set. On coarsest graphs (n <= coarsen_floor = 120) this
-    // is fine.
-    let mut gain: Vec<i32> = vec![0; n];
+    let mut weight_to_a: Vec<i32> = vec![0; n];
     let mut in_boundary: Vec<bool> = vec![false; n];
     let mut boundary: Vec<i32> = Vec::new();
 
-    // Per-vertex total incident edge weight (constant). Turns the
-    // edges-to-A accumulator into the true GGP gain in the scan below.
-    let mut wtot: Vec<i32> = vec![0; n];
-    for (v, wt) in wtot.iter_mut().enumerate() {
+    let mut incident_weight: Vec<i32> = vec![0; n];
+    for (v, wt) in incident_weight.iter_mut().enumerate() {
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
         for k in lo..hi {
@@ -87,12 +74,10 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         }
     }
 
-    // Add v's still-in-B neighbours to the boundary and credit each
-    // with the v-u edge weight on the A side.
     let push_neighbors = |v: usize,
                           graph: &Graph,
                           labels: &[u8],
-                          gain: &mut [i32],
+                          weight_to_a: &mut [i32],
                           in_boundary: &mut [bool],
                           boundary: &mut Vec<i32>| {
         let lo = graph.xadj[v] as usize;
@@ -102,9 +87,7 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
             if labels[u] != PART_B {
                 continue;
             }
-            // v is in A, u is in B: edge (v,u) is one more edge on u's
-            // A side.
-            gain[u] = gain[u].saturating_add(graph.wgt(k));
+            weight_to_a[u] = weight_to_a[u].saturating_add(graph.wgt(k));
             if !in_boundary[u] {
                 in_boundary[u] = true;
                 boundary.push(u as i32);
@@ -116,21 +99,19 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         seed,
         graph,
         &labels,
-        &mut gain,
+        &mut weight_to_a,
         &mut in_boundary,
         &mut boundary,
     );
 
     while a_weight < target_a && !boundary.is_empty() {
-        // Pick best-gain boundary vertex.
         let mut best_i: usize = 0;
         let mut best_g: i64 = i64::MIN;
         for (i, &v) in boundary.iter().enumerate() {
             if labels[v as usize] != PART_B {
                 continue;
             }
-            // True GGP gain: edges_to_A - edges_to_B = 2*edges_to_A - wtot.
-            let g = 2 * gain[v as usize] as i64 - wtot[v as usize] as i64;
+            let g = 2 * weight_to_a[v as usize] as i64 - incident_weight[v as usize] as i64;
             if g > best_g {
                 best_g = g;
                 best_i = i;
@@ -144,13 +125,11 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         labels[vu] = PART_A;
         in_boundary[vu] = false;
         a_weight += graph.vwgt[vu] as i64;
-        // Update neighbors' gains: v was in B, now in A; each
-        // B-neighbor u of v sees +adjwgt(v,u) toward A.
         push_neighbors(
             vu,
             graph,
             &labels,
-            &mut gain,
+            &mut weight_to_a,
             &mut in_boundary,
             &mut boundary,
         );
@@ -195,53 +174,7 @@ pub fn initial_bisect_bfs(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
 mod tests {
     use super::*;
     use crate::coarsen::{coarsen_level, CoarsenCounters};
-    use rslab_ordering_core::CscPattern;
-    use std::collections::BTreeSet;
-
-    fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
-        let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &(i, j) in triples {
-            set.insert((i, j));
-            set.insert((j, i));
-        }
-        let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
-        for &(r, c) in &set {
-            cols[c].push(r as i32);
-        }
-        for col in &mut cols {
-            col.sort();
-        }
-        let mut col_ptr: Vec<i32> = vec![0];
-        let mut row_idx: Vec<i32> = Vec::new();
-        for col in &cols {
-            for &r in col {
-                row_idx.push(r);
-            }
-            col_ptr.push(row_idx.len() as i32);
-        }
-        (col_ptr, row_idx)
-    }
-
-    fn grid(m: usize, n: usize) -> Graph {
-        let idx = |r: usize, c: usize| r * n + c;
-        let total = m * n;
-        let mut t = Vec::new();
-        for r in 0..m {
-            for c in 0..n {
-                let k = idx(r, c);
-                t.push((k, k));
-                if r + 1 < m {
-                    t.push((k, idx(r + 1, c)));
-                }
-                if c + 1 < n {
-                    t.push((k, idx(r, c + 1)));
-                }
-            }
-        }
-        let (cp, ri) = csc_from_triples(total, &t);
-        let pat = CscPattern::new(total, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
-    }
+    use crate::tests::grid;
 
     fn total_weight(graph: &Graph) -> i64 {
         graph.vwgt.iter().map(|&w| w as i64).sum()
@@ -249,11 +182,9 @@ mod tests {
 
     #[test]
     fn cut_size_on_known_bisection() {
-        let g = grid(2, 2); // four vertices, four edges
-                            // Split into {0,1} and {2,3}. Cut edges: (0,2) and (1,3) -> 2.
+        let g = grid(2, 2);
         let labels = vec![PART_A, PART_A, PART_B, PART_B];
         assert_eq!(cut_size(&g, &labels), 2);
-        // All together -> zero cut.
         let zero = vec![PART_A; 4];
         assert_eq!(cut_size(&g, &zero), 0);
     }
@@ -275,8 +206,6 @@ mod tests {
             a,
             b
         );
-        // GGP stops at the first vertex that tips a_weight past target,
-        // so |a - target| is bounded by max vertex weight (1 here).
         assert!((a - target).abs() <= 1, "GGP weight balance: a={}", a);
     }
 
@@ -296,9 +225,6 @@ mod tests {
 
     #[test]
     fn ggp_on_coarsened_graph_is_balanced() {
-        // Exercise the coarsening + bisection sequence end-to-end
-        // on a small grid. The coarse graph still has to accept a
-        // balanced bisection.
         let g = grid(8, 8);
         let mut rng = SplitMix::new(5);
         let mut ctr = CoarsenCounters::default();
@@ -326,20 +252,6 @@ mod tests {
 
     #[test]
     fn ggp_uses_true_gain_not_edges_to_a() {
-        // Weighted graph that separates the *true* GGP gain
-        // (edges_to_A - edges_to_B) from edges-to-A alone. Selecting on
-        // edges-to-A would pull in a high-degree vertex that inflates
-        // the cut; the documented GGP gain must not.
-        //
-        //   index 0 = s  (seed; SplitMix seed 1 makes gen_range(7) == 0)
-        //   index 1 = w : s--w weight 3                 (W[w] = 3)
-        //   index 2 = u : s--u weight 5, u--b1..b4 wt 1  (W[u] = 9)
-        //   index 3..6  = b1..b4 : each only u--bi weight 1
-        //
-        // After seeding s the boundary is {w, u}:
-        //   edges_to_A:  w = 3, u = 5  -> max-edges-to-A picks u (wrong).
-        //   true gain (2*edges_to_A - W): w = 6-3 = 3, u = 10-9 = 1
-        //     -> GGP must pick w. Pulling u gives cut 7; w gives cut 5.
         let g = Graph {
             nvtxs: 7,
             xadj: vec![0, 2, 3, 8, 9, 10, 11, 12],
@@ -348,7 +260,6 @@ mod tests {
             vwgt: vec![1; 7],
         };
         let mut rng = SplitMix::new(1);
-        // target_a = 2: seed (weight 1) plus exactly one pulled vertex.
         let labels = initial_bisect_ggp(&g, &mut rng, 2);
         assert_eq!(labels[0], PART_A, "seed s must be in A");
         assert_eq!(

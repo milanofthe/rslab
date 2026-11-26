@@ -31,14 +31,12 @@ HERE = Path(__file__).resolve().parent
 OUT = HERE / "bench_out"
 PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else OUT / "accel_history.jsonl"
 
-# The three shipped paths, in figure order: (family, rslab solver key, label, color).
 PATHS = [
     ("sym", "auto", "LDLT path (EM/FEM)", st.BLUE),
     ("unsym", "auto", "LU path (CFD, MoM)", st.CYAN),
     ("circuit", "klu", "KLU path (circuit MNA)", st.SOLVERS["klu"][1]),
 ]
 
-# Matrix classes as they appear in the bench names: prefix -> (label, family, solver).
 CLASSES = {
     "circuit": ("circuit MNA", "circuit", "klu"),
     "curlcurl": ("curl-curl Maxwell", "sym", "auto"),
@@ -49,10 +47,6 @@ CLASSES = {
     "mom": ("BEM/MoM near field", "unsym", "auto"),
 }
 
-# Short note per release for the timeline callouts. Releases without an entry stay
-# unlabeled (patch releases, wasm and CI fixes).
-# Kept to a few words each: the callouts are set vertically at their release, so
-# their length is headroom the data has to give up.
 RELEASE_NOTES = {
     "v0.18.0": "ND bakeoff",
     "v0.19.0": "heuristic pick",
@@ -154,7 +148,6 @@ def class_bars(rows, ax):
     ys = np.arange(len(fac))
     h = 0.36
     vals = list(e2e.values()) + [b[1] for b in fac]
-    # Linear axis: on a log axis a bar's length is not proportional to its value.
     ax.barh(ys + h / 2, [e2e[b[0]] for b in fac], h, color=[b[3] for b in fac])
     ax.barh(ys - h / 2, [b[1] for b in fac], h, color=[b[3] for b in fac], alpha=0.45)
     ax.axvline(1.0, color=st.GRAY, lw=1.0, ls="--")
@@ -198,9 +191,6 @@ def timeline(rows, ax, metric, annotate=True):
     lo = np.nanmin([y for ys in series.values() for y in ys])
     hi = np.nanmax([y for ys in series.values() for y in ys])
     if annotate:
-        # Set vertically at a common baseline above the data: with 18 releases a
-        # horizontal callout is wider than the space between two of them, so
-        # rotating is what keeps the labels from running into each other.
         for i, v in enumerate(vers):
             note = RELEASE_NOTES.get(v)
             if not note:
@@ -239,25 +229,19 @@ def scaling(rows, ax, metric="factor"):
         ax.plot([p[0] for p in pts], [p[1] for p in pts], marker="o", ms=3.5,
                 color=color[fam], lw=1.3)
         labels.append([pts[-1][0], pts[-1][1], label, color[fam]])
-    # Label each class at its largest matrix, then push apart the ones that would
-    # print on top of each other: two classes can end at nearly the same size and
-    # ratio, and a fixed placement then overlaps.
     labels.sort(key=lambda l: l[1])
-    min_sep = 0.055                       # decades of y, at this figure height
+    min_sep_decades = 0.055
     for i in range(1, len(labels)):
         x, y, _, _ = labels[i]
         px, py, _, _ = labels[i - 1]
         close_x = abs(np.log10(x / px)) < 0.5
-        if close_x and np.log10(y / py) < min_sep:
-            labels[i][1] = py * 10 ** min_sep
+        if close_x and np.log10(y / py) < min_sep_decades:
+            labels[i][1] = py * 10 ** min_sep_decades
     for x, y, label, c in labels:
         ax.annotate(f" {label}", (x, y), fontsize=6.5, color=c, va="center",
                     ha="left")
 
     ax.axhline(1.0, color=st.GRAY, lw=1.0, ls="--")
-    # Anchored in axes fraction, not in data: anchoring to `get_xlim()` before
-    # the scale switch put the label at the linear-scale origin, which a log axis
-    # then had to grow to include (a 241534 px wide figure).
     ax.text(0.01, 1.0, " Accelerate", color=st.GRAY, fontsize=7, va="bottom",
             ha="left", transform=ax.get_yaxis_transform())
     ax.set_xscale("log")

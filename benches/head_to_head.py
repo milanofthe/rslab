@@ -23,9 +23,6 @@ from matplotlib.lines import Line2D
 import bench_style
 from fit_scaling import plot_metric
 
-# RSLAB's fixed default config is drawn alongside the heuristic pick (solver id
-# "auto" = what `factor()` ships), so the gap the pick closes (default -> auto)
-# is visible against the external solvers.
 ORDER = ["default", "auto", "faer", "pardiso"]
 
 
@@ -33,7 +30,6 @@ def run(path, title, slug, mtype):
     recs = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
     out = path.parent
     print(f"== {title} ==")
-    # One figure, two panels: wall-clock time (left) + peak memory (right), same x-axis.
     fig, (ax_wct, ax_mem) = bench_style.two_panel()
     print("  factor time ~ nnz^alpha:")
     present = plot_metric(recs, "time", "fac_ms", "factor time [ms]", None,
@@ -42,8 +38,6 @@ def run(path, title, slug, mtype):
     plot_metric(recs, "mem", "mem_mb", "peak memory [MB]", None, order=ORDER, ax=ax_mem)
     fig.suptitle(f"{title}: factor time & peak memory (mtype {mtype})",
                  color=bench_style.GRAY)
-    # One shared legend for both panels: solver identity only (the per-panel scaling
-    # exponents differ and are annotated on the fit lines).
     handles = [Line2D([], [], color=c, marker=mk, ls="", label=lbl)
                for _, lbl, c, mk in present]
     bench_style.legend_below(fig, handles=handles, labels=[h.get_label() for h in handles])

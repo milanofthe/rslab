@@ -25,7 +25,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
 
-/// Files kept out of the scan entirely, with the reason.
 const EXEMPT_FILES: &[(&str, &str)] = &[
     (
         "src/matgen/",
@@ -41,7 +40,6 @@ const EXEMPT_FILES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Items (`file`, enclosing item) kept out of the scan, with the reason.
 const EXEMPT_ITEMS: &[(&str, &str, &str)] = &[
     (
         "src/symbolic/supervariables.rs",
@@ -60,7 +58,6 @@ const EXEMPT_ITEMS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Roots scanned, relative to the workspace root. `crates/*/src` expands.
 const ROOTS: &[&str] = &["src", "crates/*/src", "python/src"];
 
 #[derive(Debug, Clone)]
@@ -92,7 +89,6 @@ fn numeric_literals_are_named() {
     }
     files.sort();
 
-    // Out-of-line modules declared under `#[cfg(test)]` are test code.
     let mut sources = Vec::new();
     let mut test_files = Vec::new();
     for f in &files {
@@ -175,7 +171,6 @@ fn is_constants_module(rel: &str) -> bool {
     rel.ends_with("/constants.rs") || rel.contains("/constants/")
 }
 
-/// Whether the attributes mark test-only code.
 fn is_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
         let p = a.path();
@@ -203,7 +198,6 @@ fn is_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// The files of the out-of-line `#[cfg(test)] mod x;` declarations in `file`.
 fn test_modules(file: &Path, items: &[syn::Item], out: &mut Vec<PathBuf>) {
     let name = file.file_stem().unwrap_or_default().to_string_lossy();
     let dir = file.parent().unwrap_or(Path::new("."));
@@ -280,7 +274,6 @@ impl Scan<'_> {
         }
     }
 
-    /// Numeric literals of a token stream (macro bodies, pyo3 signatures).
     fn check_tokens(&mut self, ts: TokenStream) {
         for t in ts {
             match t {
@@ -314,8 +307,6 @@ impl Scan<'_> {
 }
 
 impl Scan<'_> {
-    /// An index expression: literals as the index, as range bounds or as an
-    /// offset `i + 3` / `n - 1` are structural; anything else is scanned.
     fn visit_index(&mut self, e: &syn::Expr) {
         match e {
             syn::Expr::Lit(_) => {}

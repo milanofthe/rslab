@@ -98,12 +98,8 @@ pub enum AutoBackend {
     Lu,
 }
 
-/// The LDL^T side structure of a structurally symmetric pattern: the
-/// transposed slot of each slot for the value-symmetry test, and the lower
-/// triangle with its analysis.
 struct LdltCandidate {
     tpair: Vec<usize>,
-    /// Lower-triangle entry -> the full slot it reads its value from.
     lower_from: Vec<usize>,
     col_ptr: Vec<usize>,
     row_idx: Vec<usize>,
@@ -111,9 +107,6 @@ struct LdltCandidate {
 }
 
 impl LdltCandidate {
-    /// `None` if the pattern is structurally unsymmetric or its lower
-    /// triangle fails to analyze. `amd` is the analysis' minimum-degree
-    /// candidate.
     fn build(layout: &CscLayout, opts: &SolverSettings, amd: &[usize]) -> Option<Self> {
         let tpair = layout.transpose_slots()?;
         let (n, cp, ri) = (layout.n(), layout.col_ptr(), layout.row_idx());
@@ -145,10 +138,7 @@ impl LdltCandidate {
         })
     }
 
-    /// Whether the slot values are symmetric within `tol` (see
-    /// [`AutoSettings::symmetry_tol`]; the transpose for complex fields, not
-    /// the adjoint).
-    fn symmetric<T: Scalar>(&self, vals: &[T], tol: f64) -> bool {
+    fn equals_transpose<T: Scalar>(&self, vals: &[T], tol: f64) -> bool {
         if tol == 0.0 {
             return (vals.iter().zip(&self.tpair)).all(|(&v, &t)| v == vals[t]);
         }
@@ -156,7 +146,6 @@ impl LdltCandidate {
         (vals.iter().zip(&self.tpair)).all(|(&v, &t)| (v - vals[t]).magnitude() <= bound)
     }
 
-    /// The lower triangle of the slot values `vals`, into `lower`.
     fn lower<T: Scalar>(&self, vals: &[T], lower: &mut Option<CscMatrix<T>>) {
         let m = lower.get_or_insert_with(|| CscMatrix {
             n: self.col_ptr.len() - 1,
@@ -179,8 +168,6 @@ impl LdltCandidate {
     }
 }
 
-/// The analysis of the path the pattern's work selected. Boxed: the analyses
-/// are large and of very different sizes.
 enum Route {
     Klu(Box<KluSymbolic>),
     Supernodal {
@@ -308,9 +295,6 @@ impl AutoSymbolic {
         AutoSolver::over(Analysis::Borrowed(self))
     }
 
-    /// The analysis of `a`'s pattern in the path its work selects. KLU's
-    /// analysis predicts the work; on the supernodal paths its ordering is
-    /// their race's minimum-degree candidate.
     fn route<T: Scalar>(
         &self,
         a: &GeneralCsc<T>,
@@ -343,8 +327,6 @@ impl AutoSymbolic {
     }
 }
 
-/// The analysis an [`AutoSolver`] factors over: borrowed, or held (shared
-/// with other solvers, or its own after a one-shot [`AutoSolver::factor`]).
 #[derive(Clone)]
 enum Analysis<'s> {
     Borrowed(&'s AutoSymbolic),
@@ -360,8 +342,6 @@ impl Analysis<'_> {
     }
 }
 
-/// Factor into `slot` in place when it holds a factor of the same analysis,
-/// fresh otherwise.
 fn in_place<S>(
     slot: &mut Option<S>,
     refactor: impl FnOnce(&mut S) -> Result<(), RslabError>,
@@ -397,25 +377,14 @@ pub struct AutoSolver<'s, T> {
     klu: Option<KluSolver<T>>,
     ldlt: Option<LdltSolver<T>>,
     lu: Option<LuSolver<T>>,
-    /// The path holding the factor of the last successful factorization.
     active: Option<AutoBackend>,
-    /// The values of the last successful factorization; empty without one
-    /// or when it was a pencil member's.
     prev: Vec<T>,
-    /// The pencil member of the last successful factorization, `(pencil,
-    /// generation, alpha)` with its extra values in `member_extra`; `None`
-    /// without one or when other values were factored.
     member: Option<(u64, u64, T)>,
     member_extra: Vec<T>,
-    /// The worker policy of the active factor, which a Krylov solve
-    /// preconditioned by it orthogonalizes under.
     solve_threads: Threads,
     solves: crate::diagnostics::SolveCounter,
-    /// The works of its own `solve*` calls.
     works: crate::numeric::direct::WorkPool<T>,
-    /// A [`fork`](Self::fork): the KLU pivot order stays its origin's.
     pinned: bool,
-    /// A fork's factor of the value set its origin's order failed on.
     own: Option<KluSolver<T>>,
 }
 
@@ -474,7 +443,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
         let mut f = self.clone();
         f.pinned = true;
         if f.own.take().is_some() {
-            // the origin's last factor was its own: the fork holds the order
             f.active = None;
             f.prev.clear();
             f.member = None;
@@ -482,7 +450,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
         f
     }
 
-    /// The active KLU factor: a fork's own where its origin's order failed.
     fn klu_factor(&self) -> Option<&KluSolver<T>> {
         self.own.as_ref().or(self.klu.as_ref())
     }
@@ -552,7 +519,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// factor; after an error no factor is held.
     pub fn refactor(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
         if let Some(b) = self.active {
-            // NaN never compares equal, so a poisoned value set re-factors.
+            // https://github.com/milanofthe/rslab/issues/290
             if self.prev == self.csc.values {
                 return Ok(b);
             }
@@ -562,7 +529,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
         Ok(b)
     }
 
-    /// Factor the loaded values, the last factored ones forgotten.
     fn factor_now(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
         self.active = None;
         self.prev.clear();
@@ -598,7 +564,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
         let csc = &self.csc;
         match route {
             Route::Klu(ks) => {
-                // A replay that meets a vanished pivot factors afresh.
                 if let Some(s) = &mut self.klu {
                     if s.refactor(csc).is_ok() {
                         self.own = None;
@@ -606,9 +571,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
                     }
                 }
                 if self.pinned {
-                    // a fork keeps its origin's order (a failed replay
-                    // leaves it in place), or none where the origin had
-                    // none: the fresh factor for this value set only
                     self.own = None;
                     self.own = Some(ks.factor(csc, &settings.klu)?);
                     return Ok(AutoBackend::Klu);
@@ -620,7 +582,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
             Route::Supernodal { ldlt, lu, amd } => {
                 let opts = &settings.supernodal;
                 if let Some(cand) = ldlt {
-                    if cand.symmetric(&csc.values, settings.symmetry_tol) {
+                    if cand.equals_transpose(&csc.values, settings.symmetry_tol) {
                         cand.lower(&csc.values, &mut self.lower);
                         if let Some(lower) = &self.lower {
                             let done = in_place(
@@ -684,7 +646,6 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// an analysis no other holds.
     pub fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
-        // A held analysis counts once, with its only holder.
         let own = match &self.sym {
             Analysis::Held(s) if Arc::strong_count(s) == 1 => s.heap_bytes(),
             _ => 0,
@@ -747,7 +708,6 @@ impl<T: Scalar> SolveCore<T> for AutoSolver<'_, T> {
         &self.works
     }
 
-    /// The active factor's.
     fn perturbations(&self) -> &[crate::PivotFloor<T>] {
         match self.active {
             Some(AutoBackend::Klu) => self.klu_factor().map_or(&[], |s| s.perturbations()),
@@ -777,6 +737,8 @@ crate::numeric::direct::direct_solver!(AutoSolver<'s>);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::{solve_backward_error, U64, UC64};
+    use crate::test_grid::grid;
     use num_complex::Complex;
 
     fn layout(n: usize, rows: &[usize], cols: &[usize]) -> AutoSymbolic {
@@ -789,7 +751,6 @@ mod tests {
 
     #[test]
     fn sums_duplicates_and_solves_every_way() {
-        // A = [[2, 1], [0, 3]] with (0, 0) given as 1.5 + 0.5.
         let sym = layout(2, &[0, 0, 0, 1], &[0, 0, 1, 1]);
         let mut f = sym.factorizer::<f64>();
         f.assemble(&[1.5, 0.5, 1.0, 3.0]);
@@ -810,7 +771,6 @@ mod tests {
 
     #[test]
     fn forks_factor_a_value_set_whatever_they_factored_before() {
-        // [[a, b], [c, d]] in entry order (0,0), (0,1), (1,0), (1,1)
         let sym = layout(2, &[0, 0, 1, 1], &[0, 1, 0, 1]);
         let s = AutoSettings::default();
         let mut origin = sym.factorizer::<f64>();
@@ -818,7 +778,6 @@ mod tests {
         origin.refactor(&s).unwrap();
         let point = [2.0, 1.0, 1.0, 3.0];
         let b = [1.0, 2.0];
-        // one fork first meets a value set whose (0, 0) pivot vanishes
         let mut a = origin.fork();
         a.assemble(&[0.0, 1.0, 1.0, 3.0]);
         a.refactor(&s).unwrap();
@@ -842,7 +801,6 @@ mod tests {
         let mut origin = sym.factorizer::<f64>();
         origin.assemble(&[0.0, 0.0, 0.0, 0.0]);
         assert!(origin.refactor(&s).is_err());
-        // a small (0, 0) the order of the first value set would pivot on
         let (first, point) = ([4.0, 1.0, 1.0, 3.0], [1e-5, 1.0, 1.0, 3.0]);
         let b = [1.0, 2.0];
         let mut a = origin.fork();
@@ -890,29 +848,12 @@ mod tests {
         ));
     }
 
-    /// The `(rows, cols)` of an `m x m` grid Laplacian's pattern.
-    fn grid(m: usize) -> (Vec<usize>, Vec<usize>) {
-        let (mut rows, mut cols) = (Vec::new(), Vec::new());
-        for i in 0..m * m {
-            rows.push(i);
-            cols.push(i);
-            for j in [i + 1, i + m] {
-                if j < m * m && (j != i + 1 || j % m != 0) {
-                    rows.extend([i, j]);
-                    cols.extend([j, i]);
-                }
-            }
-        }
-        (rows, cols)
-    }
-
     fn laplacian(rows: &[usize], cols: &[usize]) -> Vec<f64> {
         (rows.iter().zip(cols))
             .map(|(&r, &c)| if r == c { 4.0 } else { -1.0 })
             .collect()
     }
 
-    /// `A 1`, the row sums of the entries.
     fn row_sums<T: Scalar>(n: usize, rows: &[usize], vals: &[T]) -> Vec<T> {
         let mut b = vec![T::zero(); n];
         for (&r, &v) in rows.iter().zip(vals) {
@@ -921,9 +862,34 @@ mod tests {
         b
     }
 
+    fn abs_row_sums<T: Scalar>(n: usize, rows: &[usize], vals: &[T]) -> Vec<f64> {
+        let mut s = vec![0.0f64; n];
+        for (&r, v) in rows.iter().zip(vals) {
+            s[r] += v.magnitude();
+        }
+        s
+    }
+
+    fn backward_error<T: Scalar>(
+        rows: &[usize],
+        cols: &[usize],
+        vals: &[T],
+        x: &[T],
+        b: &[T],
+    ) -> f64 {
+        let mut r = b.to_vec();
+        for ((&i, &j), &v) in rows.iter().zip(cols).zip(vals) {
+            r[i] = r[i] - v * x[j];
+        }
+        let inf = |v: &[T]| v.iter().map(|e| e.magnitude()).fold(0.0, f64::max);
+        let a_norm = abs_row_sums(b.len(), rows, vals)
+            .into_iter()
+            .fold(0.0, f64::max);
+        inf(&r) / (a_norm * inf(x) + inf(b))
+    }
+
     #[test]
     fn sparse_work_takes_klu_at_any_size() {
-        // A 20k chain: large, but no dense work.
         let n = 20_000;
         let (mut rows, mut cols) = (Vec::new(), Vec::new());
         for i in 0..n {
@@ -946,7 +912,6 @@ mod tests {
 
     #[test]
     fn dense_work_takes_ldlt_then_lu_then_ldlt_in_place() {
-        // A 130 x 130 grid (~70 flops per factor entry): supernodal.
         let (rows, cols) = grid(130);
         let n = 130 * 130;
         let s = AutoSettings::default();
@@ -959,8 +924,6 @@ mod tests {
         let x = f.solve(&b).unwrap();
         assert!(close(&x, &vec![1.0; n]));
 
-        // One off-diagonal broken from its mirror: the LU takes it, forward
-        // and transposed.
         let mut asym = vals.clone();
         asym[1] = -0.5;
         f.assemble(&asym);
@@ -972,7 +935,6 @@ mod tests {
         let plan = sym.memory_plan::<f64>(&s, 1).unwrap();
         assert!(plan.factor_bytes > 0 && plan.analysis_bytes > 0);
 
-        // Symmetric again: LDL^T in place, the same bits as at first.
         f.assemble(&vals);
         assert_eq!(f.refactor(&s).unwrap(), AutoBackend::Ldlt);
         let xr = f.solve(&b).unwrap();
@@ -995,7 +957,6 @@ mod tests {
         let b = row_sums(n, &rows, &vals);
         let (x1, x2) = (one.solve(&b).unwrap(), shared.solve(&b).unwrap());
         assert!(x1.iter().zip(&x2).all(|(a, b)| a.to_bits() == b.to_bits()));
-        // A factorization like the others: a preconditioner behind the trait.
         let f: &dyn crate::Factorization<f64> = &one;
         assert_eq!((f.n(), f.n_perturbed()), (n, 0));
     }
@@ -1005,7 +966,8 @@ mod tests {
         let (rows, cols) = grid(130);
         let n = 130 * 130;
         let mut vals = laplacian(&rows, &cols);
-        vals[1] *= 1.0 + 1e-14; // one mirror pair off by a rounding
+        let skew = 1e-14;
+        vals[1] *= 1.0 + skew;
         let sym = Arc::new(layout(n, &rows, &cols));
         let mut exact = AutoSolver::<f64>::new(sym.clone());
         exact.assemble(&vals);
@@ -1019,15 +981,26 @@ mod tests {
         assert_eq!(within.refactor(&s).unwrap(), AutoBackend::Ldlt);
         let b = row_sums(n, &rows, &vals);
         let (x1, x2) = (exact.solve(&b).unwrap(), within.solve(&b).unwrap());
-        assert!(x1.iter().zip(&x2).all(|(a, b)| (a - b).abs() < 1e-10));
+        let a_norm = abs_row_sums(n, &rows, &vals)
+            .into_iter()
+            .fold(0.0, f64::max);
+        let omega = solve_backward_error(n, U64);
+        let symmetrized = omega + vals[1].abs() * skew / a_norm;
+        let (e1, e2) = (
+            backward_error(&rows, &cols, &vals, &x1, &b),
+            backward_error(&rows, &cols, &vals, &x2, &b),
+        );
+        assert!(e1 <= omega, "exact symmetry: backward error {e1:e}");
+        assert!(
+            e2 <= symmetrized,
+            "within the tolerance: backward error {e2:e}"
+        );
     }
 
     #[test]
     fn unchanged_values_keep_the_factor() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
-        // The factor keeps the interrupt flag: once raised, any numeric work
-        // fails, so only the identity path can succeed.
         let flag = Arc::new(AtomicBool::new(false));
         let s =
             AutoSettings::default().with_klu(KluSettings::default().with_interrupt(flag.clone()));
@@ -1062,7 +1035,12 @@ mod tests {
             f.refactor(&AutoSettings::default()).unwrap(),
             AutoBackend::Ldlt
         );
-        let x = f.solve(&row_sums(n, &rows, &vals)).unwrap();
-        assert!(x.iter().all(|v| (v - c(1.0, 0.0)).norm() < 1e-10));
+        let b = row_sums(n, &rows, &vals);
+        let x = f.solve(&b).unwrap();
+        let omega = backward_error(&rows, &cols, &vals, &x, &b);
+        assert!(
+            omega <= solve_backward_error(n, UC64),
+            "backward error {omega:e}"
+        );
     }
 }

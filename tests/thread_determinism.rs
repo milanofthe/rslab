@@ -14,21 +14,17 @@ use rslab::{
     OrderingMethod, Scalar, SolverSettings, Threads,
 };
 
-/// The most a diagonally dominant matrix's entries grow under elimination.
-const GROWTH: f64 = 2.0;
+pub mod common;
 
-/// The thread counts every solve is checked at.
+use common::constants::{gamma, DIAGONALLY_DOMINANT_GROWTH, U64};
+
 const THREADS: [usize; 3] = [1, 2, 8];
 
-/// The backward error bound of a solve of dimension `n` in `T`.
 fn bound<T: Scalar>(n: usize) -> f64 {
-    let u = f64::EPSILON / 2.0;
-    let m = (if T::COMPLEX { 2 * n } else { n }) as f64;
-    GROWTH * m * u / (1.0 - m * u)
+    let m = if T::COMPLEX { 2 * n } else { n };
+    DIAGONALLY_DOMINANT_GROWTH * gamma(m, U64)
 }
 
-/// `|A x - b|_inf / (|A|_inf |x|_inf + |b|_inf)` for `A` given by its
-/// entries `(row, column, value)`.
 fn backward_error<T: Scalar>(n: usize, entries: &[(usize, usize, T)], x: &[T], b: &[T]) -> f64 {
     let (mut r, mut rows) = (
         b.iter().map(|&v| T::zero() - v).collect::<Vec<T>>(),
@@ -43,7 +39,6 @@ fn backward_error<T: Scalar>(n: usize, entries: &[(usize, usize, T)], x: &[T], b
     inf(&r) / (a * inf(x) + inf(b))
 }
 
-/// The entries of the symmetric matrix whose lower triangle is `a`.
 fn symmetric<T: Scalar>(a: &CscMatrix<T>) -> Vec<(usize, usize, T)> {
     let mut e = Vec::new();
     for j in 0..a.n {
@@ -64,8 +59,6 @@ fn general<T: Scalar>(a: &GeneralCsc<T>) -> Vec<(usize, usize, T)> {
         .collect()
 }
 
-/// Every thread count of [`THREADS`] solves within the bound, and the last
-/// one gives the same bits run after run.
 fn check<T: Scalar>(
     what: &str,
     entries: &[(usize, usize, T)],
@@ -92,7 +85,6 @@ fn check<T: Scalar>(
     }
 }
 
-/// 3D 7-point Laplacian (k^3 grid, SPD, lower triangle).
 fn grid3d(k: usize) -> CscMatrix<f64> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
@@ -125,7 +117,6 @@ fn grid3d(k: usize) -> CscMatrix<f64> {
     CscMatrix::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// 3D convection-diffusion grid (unsymmetric, general CSC).
 fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
@@ -160,8 +151,6 @@ fn grid3d_conv(k: usize) -> GeneralCsc<f64> {
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-/// Grid edge sizes: larger in release; debug (the CI profile) shrinks them
-/// so the factors fit the runner budget.
 const K_LDLT: usize = if cfg!(debug_assertions) { 16 } else { 24 };
 const K_LDLT_C: usize = 16;
 const K_LU: usize = if cfg!(debug_assertions) { 14 } else { 22 };
@@ -196,12 +185,6 @@ fn complex_ldlt_meets_the_bound_at_every_thread_count() {
     });
 }
 
-/// A complex factorization under a one-thread budget gives the bits it
-/// gives on a rayon pool of one (`Threads::Ambient` inside it, the kernels
-/// on that pool's worker): the budget runs the kernels on the calling
-/// thread under a lent pool of one, where the parallel products once ran
-/// in column blocks and rounded otherwise. A 12^3 curl-curl grid with the
-/// parallel gates lowered to 10^6, so that its fronts take those products.
 #[cfg(feature = "matgen")]
 #[test]
 fn complex_factor_on_a_one_thread_budget_matches_a_pool_of_one() {
@@ -258,9 +241,6 @@ fn complex_lu_meets_the_bound_at_every_thread_count() {
     });
 }
 
-/// A random unsymmetric matrix with a dominant diagonal; with `holes` every
-/// seventh diagonal entry is left out, its column carrying the pivot of the
-/// next row instead (a 2x2 swap the row matching has to find).
 fn unsymmetric(n: usize, holes: bool) -> GeneralCsc<f64> {
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
     let mut next = move || {
@@ -300,10 +280,6 @@ fn in_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
         .install(f)
 }
 
-/// The ordering race, with nested dissection and its seed ensemble forced in
-/// and the dissection started speculatively, picks the same ordering whatever
-/// the analysis pool: the factors under one and eight analysis workers solve
-/// bit-identically.
 #[test]
 fn the_race_is_thread_count_invariant() {
     let a = grid3d(16);
@@ -318,12 +294,12 @@ fn the_race_is_thread_count_invariant() {
             .solve(&b)
             .unwrap()
     };
-    assert!(solve(1) == solve(8));
+    assert!(
+        solve(1) == solve(8),
+        "the race picks another ordering on one and on eight analysis workers"
+    );
 }
 
-/// The LU path with the row matching meets the bound at every thread count;
-/// the KLU path with parallel blocks factors every block on one thread, so
-/// its bits are the same at one and eight workers.
 #[test]
 fn lu_with_matching_and_klu_across_threads() {
     let a = unsymmetric(if cfg!(debug_assertions) { 2000 } else { 20_000 }, true);
@@ -333,7 +309,10 @@ fn lu_with_matching_and_klu_across_threads() {
             .with_threads(t)
             .with_ordering(OrderingMethod::Amd);
         let f = LuSolver::factor(&a, &s).unwrap();
-        assert!(f.diagnostics().decisions.scaling.contains("Mc64"));
+        assert!(
+            f.diagnostics().decisions.scaling.contains("Mc64"),
+            "the LU path does not take the row matching"
+        );
         f.solve(&b).unwrap()
     });
     let klu = |t: usize| {
@@ -342,5 +321,8 @@ fn lu_with_matching_and_klu_across_threads() {
             .with_threads(Threads::Ambient);
         in_pool(t, || KluSolver::factor(&a, &s).unwrap().solve(&b).unwrap())
     };
-    assert!(klu(1) == klu(8));
+    assert!(
+        klu(1) == klu(8),
+        "KLU with parallel blocks gives other bits at one and at eight workers"
+    );
 }

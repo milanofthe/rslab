@@ -51,7 +51,7 @@ def load(path):
         r = json.loads(line)
         cost = r.get("cost")
         if not cost:
-            continue  # only the thread-ladder records carry the cost block
+            continue
         ms = r["metrics"]["factor_ms"]
         if ms is None or ms <= 0:
             continue
@@ -70,18 +70,16 @@ def features(cost, threads):
     flops = max(float(cost["factor_flops"]), 1.0)
     crit = max(float(cost["critical_path_flops"]), 1.0)
     width = max(float(cost["max_tree_width"]), 1.0)
-    return [
-        1.0,                       # intercept
-        crit / flops,              # amdahl_frac in (0,1]: how serial the tree is
-        math.log(threads),         # ladder position (per-thread overhead trend)
-        math.log(width),           # tree width (parallelism available)
-    ]
+    intercept = 1.0
+    amdahl_frac = crit / flops
+    log_threads = math.log(threads)
+    log_tree_width = math.log(width)
+    return [intercept, amdahl_frac, log_threads, log_tree_width]
 
 
 def ridge_fit(X, y, lam=1e-2):
     """Closed-form ridge regression (normal equations); pure Python."""
     m = len(X[0])
-    # A = X^TX + lam I ; b = X^Ty
     A = [[sum(X[k][i] * X[k][j] for k in range(len(X))) + (lam if i == j else 0.0)
           for j in range(m)] for i in range(m)]
     b = [sum(X[k][i] * y[k] for k in range(len(X))) for i in range(m)]
@@ -124,7 +122,7 @@ def build_rows(by_matrix, peak, peak_threads):
             if s_pred <= 0 or s_meas <= 0:
                 continue
             x = features(cost, threads)
-            y = math.log(s_meas / s_pred)  # residual target
+            y = math.log(s_meas / s_pred)
             rows.append((matrix, x, y, s_pred, s_meas))
     return rows
 
@@ -151,12 +149,9 @@ def main():
     print(f"{len(rows)} ladder points over {len(matrices)} matrices "
           f"(hw_speedup peak {peak:.2f} @ {peak_threads} threads)\n")
 
-    # Baseline: the bare analytical model (residual == 0).
-    base_err = [r[2] for r in rows]  # y = log(s_meas/s_pred); model predicts 0
+    base_err = [r[2] for r in rows]
     print(f"analytical-only  RMSE(log speedup) = {rmse(base_err):.4f}")
 
-    # Leave-one-matrix-out CV of the ridge residual: fit on the other matrices,
-    # predict the held-out one. This is the honest test of generalization.
     cv_err = []
     for held in matrices:
         tr = [(x, y) for (mx, x, y, *_ ) in rows if mx != held]
@@ -170,14 +165,14 @@ def main():
     improvement = 1.0 - rmse(cv_err) / max(rmse(base_err), 1e-9)
     print(f"\nresidual reduces held-out speedup error by {improvement*100:.1f}%")
 
-    # Fit the final residual on all rows for shipping (if it generalized).
     w = ridge_fit([r[1] for r in rows], [r[2] for r in rows])
     names = ["intercept", "amdahl_frac", "log_threads", "log_tree_width"]
     print("\nfitted residual weights:")
     for nm, wi in zip(names, w):
         print(f"  {nm:<16} {wi:+.4f}")
 
-    ship = improvement >= 0.10  # ship only a meaningful (>=10%) held-out gain
+    min_held_out_gain = 0.10
+    ship = improvement >= min_held_out_gain
     print(f"\n=> {'SHIP' if ship else 'DO NOT SHIP'} "
           f"(threshold 10% held-out improvement)")
     if out and ship:

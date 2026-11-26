@@ -136,7 +136,6 @@ fn amalgamation_name(s: AmalgamationStrategy) -> &'static str {
     }
 }
 
-/// A human word for the expected type of a knob.
 fn kind(ty: &str) -> &'static str {
     match ty {
         "bool" => "a bool",
@@ -377,7 +376,6 @@ pub struct PySettings {
     pub inner: SolverSettings,
     /// `threads=` was given: an explicit count beats the calibrated pick.
     pub explicit_threads: bool,
-    /// The static-pivot floor, kept for `to_dict()` / `repr`.
     preconditioner: Option<f64>,
     force_accept: bool,
     interrupt: Option<PyInterrupt>,
@@ -386,20 +384,6 @@ pub struct PySettings {
 }
 
 impl PySettings {
-    /// Build from a keyword dictionary; `None` values keep the default.
-    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut s = Self::default();
-        if let Some(kw) = kwargs {
-            for (k, v) in kw.iter() {
-                let key: String = k.extract()?;
-                if !v.is_none() {
-                    s.apply(&key, &v)?;
-                }
-            }
-        }
-        Ok(s)
-    }
-
     fn apply(&mut self, key: &str, v: &Bound<'_, PyAny>) -> PyResult<()> {
         if set_plain(&mut self.inner, key, v)? {
             return Ok(());
@@ -497,7 +481,6 @@ impl PySettings {
     }
 }
 
-/// A `threads=` value: an int, 'auto', ('auto', max) or 'ambient'.
 fn parse_threads(key: &str, v: &Bound<'_, PyAny>) -> PyResult<Threads> {
     const EXPECTED: &str = "an int, 'auto', ('auto', max) or 'ambient'";
     if let Ok(n) = v.extract::<usize>() {
@@ -516,7 +499,6 @@ fn parse_threads(key: &str, v: &Bound<'_, PyAny>) -> PyResult<Threads> {
     }
 }
 
-/// `threads` as the keyword takes it; `None` for the default unless given.
 fn threads_value(py: Python<'_>, threads: Threads, explicit: bool) -> PyObject {
     match threads {
         Threads::Fixed(n) => n.into_py(py),
@@ -529,10 +511,20 @@ fn threads_value(py: Python<'_>, threads: Threads, explicit: bool) -> PyObject {
 
 #[pymethods]
 impl PySettings {
+    /// Build from a keyword dictionary; `None` values keep the default.
     #[new]
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        Self::from_kwargs(kwargs)
+    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut s = Self::default();
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                let key: String = k.extract()?;
+                if !v.is_none() {
+                    s.apply(&key, &v)?;
+                }
+            }
+        }
+        Ok(s)
     }
 
     /// The settings as a plain dictionary, one key per keyword argument.
@@ -626,28 +618,10 @@ impl PySettings {
 pub struct PyKluSettings {
     pub inner: rslab::KluSettings,
     interrupt: Option<PyInterrupt>,
-    /// `threads=` was given.
     explicit_threads: bool,
 }
 
 impl PyKluSettings {
-    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut s = Self {
-            inner: rslab::KluSettings::default(),
-            interrupt: None,
-            explicit_threads: false,
-        };
-        if let Some(kw) = kwargs {
-            for (k, v) in kw.iter() {
-                let key: String = k.extract()?;
-                if !v.is_none() {
-                    s.apply(&key, &v)?;
-                }
-            }
-        }
-        Ok(s)
-    }
-
     fn apply(&mut self, key: &str, v: &Bound<'_, PyAny>) -> PyResult<()> {
         let o = std::mem::take(&mut self.inner);
         self.inner = match key {
@@ -698,8 +672,21 @@ impl PyKluSettings {
 impl PyKluSettings {
     #[new]
     #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        Self::from_kwargs(kwargs)
+    pub fn from_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut s = Self {
+            inner: rslab::KluSettings::default(),
+            interrupt: None,
+            explicit_threads: false,
+        };
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                let key: String = k.extract()?;
+                if !v.is_none() {
+                    s.apply(&key, &v)?;
+                }
+            }
+        }
+        Ok(s)
     }
 
     /// The settings as a plain dictionary, one key per keyword argument.

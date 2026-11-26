@@ -16,41 +16,23 @@
 //! the final positions, those columns are consecutive entries of `U(:, j)`.
 
 use super::Ki;
-use crate::constants::KLU_SN_PASS;
+use crate::constants::{
+    KLU_SN_COLUMN_ACCESSES, KLU_SN_GATHER_SCATTER_ACCESSES, KLU_SN_PASS, KLU_SN_PASS_ACCESSES,
+    KLU_SN_TRIANGLE_ACCESSES,
+};
 use crate::scalar::{fmadd, Scalar};
 
-/// Whether a supernode of `w` columns over `s` shared rows is applied by the
-/// dense kernel: where [`apply`] reads and writes memory fewer times than
-/// the column-by-column replay for a full application. With
-/// `t = w (w - 1) / 2` entries in its triangle and `w s` below it:
-///
-/// ```text
-/// column by column  4 (t + w s)          index, L value, x read, x write
-/// dense kernel      3 t                  L value, x read, x write
-///                 + w s                  L value
-///                 + 2 s (w / P + w % P)  `tmp` read and write a pass
-///                 + 7 s                  gather: index, x read, tmp write;
-///                                        scatter: index, tmp read, x write,
-///                                        tmp clear
-/// ```
-///
-/// with `P` = [`KLU_SN_PASS`] columns a full pass, the rest one a pass: a
-/// supernode of three columns never pays, one of four or more always does,
-/// one of two only without shared rows.
 fn dense_pays(w: usize, s: usize) -> bool {
     let (t, p) = (w * (w - 1) / 2, KLU_SN_PASS);
-    let column = 4 * (t + w * s); // lit: index, L value, x read, x write
-    let dense = 3 * t + w * s + 2 * s * (w / p + w % p) + 7 * s; // lit: the accesses counted above
+    let column = KLU_SN_COLUMN_ACCESSES * (t + w * s);
+    let dense = KLU_SN_TRIANGLE_ACCESSES * t
+        + w * s
+        + KLU_SN_PASS_ACCESSES * s * (w / p + w % p)
+        + KLU_SN_GATHER_SCATTER_ACCESSES * s;
     dense < column
 }
 
-/// The supernodes of the factor's `L` the dense kernel applies
-/// ([`dense_pays`]) and the storage order that applies them densely: the
-/// rows of every `L` column put in the order above and the rows of every
-/// `U` column that applies one ascending (values moved with them). Returns
-/// per column the last column of its supernode, and per column whether it
-/// reads two columns of one supernode or more (applies the dense kernel at
-/// all).
+// https://github.com/milanofthe/rslab/issues/290
 pub(super) fn layout<T: Scalar>(
     block_ptr: &[usize],
     l_colptr: &[usize],
@@ -61,15 +43,12 @@ pub(super) fn layout<T: Scalar>(
     u_val: &mut [T],
 ) -> (Vec<Ki>, Vec<bool>) {
     let n = l_colptr.len() - 1;
-    let mut last: Vec<Ki> = (0..n as Ki).collect();
+    let mut sn_last: Vec<Ki> = (0..n as Ki).collect();
     let mut mark = vec![false; n];
     let mut pairs: Vec<(Ki, T)> = Vec::new();
-    // `rank[row]`: the position of `row` in the shared rows of the
-    // current supernode.
-    let mut rank = vec![0 as Ki; n];
+    let mut shared_rank = vec![0 as Ki; n];
     for b in 0..block_ptr.len() - 1 {
         let (bs, be) = (block_ptr[b], block_ptr[b + 1]);
-        // the supernodes, from the last column of the block backwards
         let mut c = be;
         while c > bs {
             c -= 1;
@@ -88,33 +67,30 @@ pub(super) fn layout<T: Scalar>(
                     inside
                 };
                 if joins {
-                    last[c] = last[c + 1];
+                    sn_last[c] = sn_last[c + 1];
                 }
             }
         }
-        // the rows of every column of a supernode worth the kernel in the
-        // shared order; another one is taken apart into single columns
         let mut c = bs;
         while c < be {
-            let q = last[c] as usize;
+            let q = sn_last[c] as usize;
             if !dense_pays(q + 1 - c, l_colptr[q + 1] - l_colptr[q]) {
-                for (l, k) in last[c..=q].iter_mut().zip(c..) {
+                for (l, k) in sn_last[c..=q].iter_mut().zip(c..) {
                     *l = k as Ki;
                 }
             } else {
                 for (i, &r) in l_rowidx[l_colptr[q]..l_colptr[q + 1]].iter().enumerate() {
-                    rank[r as usize] = (q - c + 1 + i) as Ki;
+                    shared_rank[r as usize] = (q - c + 1 + i) as Ki;
                 }
                 for p in c..q {
                     let (lo, hi) = (l_colptr[p], l_colptr[p + 1]);
                     pairs.clear();
                     pairs.extend((lo..hi).map(|k| (l_rowidx[k], l_val[k])));
-                    // rows inside the supernode first (by row), then `S`
                     pairs.sort_unstable_by_key(|&(r, _)| {
                         if (r as usize) <= q {
                             r as usize - c
                         } else {
-                            rank[r as usize] as usize
+                            shared_rank[r as usize] as usize
                         }
                     });
                     for (k, &(r, v)) in (lo..hi).zip(&pairs) {
@@ -126,17 +102,13 @@ pub(super) fn layout<T: Scalar>(
             c = q + 1;
         }
     }
-    // A column that reads two columns of one supernode or more takes its
-    // `U` rows ascending, so the columns of a supernode it reads are
-    // consecutive; another keeps the factor's topological order, which
-    // spaces dependent updates apart.
-    let dense: Vec<bool> = (0..n)
+    let u_dense: Vec<bool> = (0..n)
         .map(|j| {
             (u_rowidx[u_colptr[j]..u_colptr[j + 1]].iter())
-                .any(|&p| (last[p as usize] as usize).min(j - 1) > p as usize)
+                .any(|&p| (sn_last[p as usize] as usize).min(j - 1) > p as usize)
         })
         .collect();
-    for j in (0..n).filter(|&j| dense[j]) {
+    for j in (0..n).filter(|&j| u_dense[j]) {
         let (lo, hi) = (u_colptr[j], u_colptr[j + 1]);
         pairs.clear();
         pairs.extend((lo..hi).map(|k| (u_rowidx[k], u_val[k])));
@@ -146,22 +118,9 @@ pub(super) fn layout<T: Scalar>(
             u_val[k] = v;
         }
     }
-    (last, dense)
+    (sn_last, u_dense)
 }
 
-/// Applies the columns `r ..= e` of one supernode to the work vector `x`
-/// (row `i` at `x[i - off]`): the triangle `x[c + 1 ..= e] -= L(c + 1 ..= e,
-/// c) x[c]` column after column, then `x[R] -= L(R, r ..= e) x[r ..= e]`
-/// over the shared rows `R` (the rows of `L(:, e)`), gathered into `tmp`.
-/// A triangle column whose `x[c]` is zero adds nothing and is passed over.
-/// The `L` value at storage position `k` is at `lv + k - lbase`. `tmp` is
-/// left all-zero, as it is found.
-///
-/// # Safety
-/// The rows of `L(:, e)` and `r ..= e` are in `x` (minus `off`), `tmp`
-/// holds `|L(:, e)|` entries, and `lv` points at `L` values complete for
-/// the columns `r ..= e`.
-// Out of line: the column loop that calls it stays small.
 #[inline(never)]
 pub(super) unsafe fn apply<T: Scalar>(
     x: &mut [T],
@@ -172,6 +131,10 @@ pub(super) unsafe fn apply<T: Scalar>(
     (lv, lbase): (*const T, usize),
     (r, e): (usize, usize),
 ) {
+    debug_assert!(off <= r && r <= e && e - off < x.len());
+    debug_assert!(tmp.len() >= l_colptr[e + 1] - l_colptr[e]);
+    debug_assert!((l_rowidx[l_colptr[e]..l_colptr[e + 1]].iter())
+        .all(|&i| i as usize >= off && i as usize - off < x.len()));
     for (c, &start) in (r..e).zip(&l_colptr[r..e]) {
         let xc = T::zero() - *x.get_unchecked(c - off);
         if xc == T::zero() {
@@ -189,7 +152,6 @@ pub(super) unsafe fn apply<T: Scalar>(
     for (t, &i) in tmp.iter_mut().zip(rows) {
         *t = *x.get_unchecked(i as usize - off);
     }
-    // `KLU_SN_PASS` columns a pass: `tmp` loaded and stored once for them
     let tail = |c: usize| lv.add(l_colptr[c] - lbase + (e - c));
     let mut c = r;
     while c + KLU_SN_PASS <= e + 1 {
@@ -219,16 +181,6 @@ pub(super) unsafe fn apply<T: Scalar>(
     }
 }
 
-/// The elimination of column `j` (block from `bs`) in its work vector `x`
-/// against the `L` columns `U(:, j)` names (slots `ks`, their rows
-/// ascending): column by column, the columns `r ..= e` of one supernode
-/// together by [`apply`]. Writes `U(:, j)` at `uv + k - ubase` and leaves the
-/// rows read zero; `wait(lo, hi)` is called before the `L` columns
-/// `lo ..= hi` are read.
-///
-/// # Safety
-/// As [`apply`] for every supernode read; `uv` points at the `U` slots
-/// `ks` of `j`, writable.
 #[inline(never)]
 pub(super) unsafe fn eliminate<T: Scalar>(
     (x, tmp): (&mut [T], &mut [T]),
@@ -239,11 +191,10 @@ pub(super) unsafe fn eliminate<T: Scalar>(
     (uv, ubase): (*mut T, usize),
     wait: impl Fn(usize, usize),
 ) {
+    debug_assert!(u_rowidx[ks.clone()].windows(2).all(|w| w[0] < w[1]));
     let mut k = ks.start;
     while k < ks.end {
         let pr = u_rowidx[k] as usize;
-        // the columns `pr ..= e` of `pr`'s supernode `j` reads, consecutive
-        // in `U(:, j)`
         let e = (sn_last[pr] as usize).min(j - 1);
         wait(pr, e);
         if e > pr {

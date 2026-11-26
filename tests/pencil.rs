@@ -12,13 +12,10 @@
 use num_complex::Complex64 as C;
 use rslab::{AutoSettings, AutoSymbolic, EntryRows, Pencil, Scalar};
 
-/// The most a diagonally dominant matrix's entries grow under elimination.
-const GROWTH: f64 = 2.0;
+pub mod common;
 
-/// A diagonally dominant, unsymmetric 6 x 6 family: `A0` with a duplicate
-/// and the full diagonal, `A1` overlapping `A0` with a duplicate and one
-/// position of its own, two extra entries (one on an `A1` position, one of
-/// its own).
+use common::constants::{gamma, DIAGONALLY_DOMINANT_GROWTH, U64};
+
 struct Family {
     n: usize,
     a0: (Vec<usize>, Vec<usize>, Vec<f64>),
@@ -48,7 +45,6 @@ fn family() -> Family {
     Family { n, a0, a1, extra }
 }
 
-/// The pencil of `f`, its values written.
 fn pencil(f: &Family) -> Pencil {
     let mut p = Pencil::new(
         f.n,
@@ -64,7 +60,6 @@ fn pencil(f: &Family) -> Pencil {
     p
 }
 
-/// The dense member `A0 + alpha*A1 + E`, row-major, from the entries.
 fn dense(f: &Family, alpha: C, extra: &[C]) -> Vec<C> {
     let n = f.n;
     let mut a = vec![C::new(0.0, 0.0); n * n];
@@ -90,17 +85,14 @@ fn inf_norm(a: &[C], n: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// `x` against the dense solve of `a x = b`, within the forward error of a
-/// stable solve (see the module docs).
 fn check(a: &[C], n: usize, b: &[C], x: &[C], complex: bool, what: &str) {
     let want = rslab::dense::lu_solve(a, n, b, 1).unwrap();
     let mut eye = vec![C::new(0.0, 0.0); n * n];
     (0..n).for_each(|i| eye[i * n + i] = C::new(1.0, 0.0));
     let inv = rslab::dense::lu_solve(a, n, &eye, n).unwrap();
     let kappa = inf_norm(a, n) * inf_norm(&inv, n);
-    let u = f64::EPSILON / 2.0;
-    let m = (if complex { 2 * n } else { n }) as f64;
-    let bound = kappa * GROWTH * m * u / (1.0 - m * u);
+    let m = if complex { 2 * n } else { n };
+    let bound = kappa * DIAGONALLY_DOMINANT_GROWTH * gamma(m, U64);
     let inf = |v: &[C]| v.iter().map(|z| z.norm()).fold(0.0, f64::max);
     let diff: Vec<C> = x.iter().zip(&want).map(|(p, q)| p - q).collect();
     let err = inf(&diff) / inf(&want);
@@ -179,25 +171,21 @@ fn unchanged_member_keeps_its_factor() {
         "new extra"
     );
     assert!(!s.factor_member(&p, 2.5, &[0.75, -1.0], &st).unwrap());
-    // another pencil of the same terms is another family
     let q = pencil(&f);
     assert!(
         s.factor_member(&q, 2.5, &[0.75, -1.0], &st).unwrap(),
-        "other pencil"
+        "another pencil of the same terms is another family"
     );
-    // values written by hand are not the member's
     let _ = s.values_mut();
     assert!(
         s.factor_member(&q, 2.5, &[0.75, -1.0], &st).unwrap(),
-        "values written"
+        "values written by hand are taken for the member's"
     );
-    // a fork of the factor holds the member
     let mut fork = s.fork();
     assert!(
         !fork.factor_member(&q, 2.5, &[0.75, -1.0], &st).unwrap(),
-        "fork"
+        "a fork of the factor does not hold the member"
     );
-    // a failed factorization holds no member
     let mut zero = Pencil::new(1, (&[0], &[0]), (&[], &[]), (&[], &[])).unwrap();
     zero.update(|a0, _| a0[0] = 0.0);
     let zsym = AutoSymbolic::new(zero.layout().clone()).unwrap();
@@ -205,7 +193,7 @@ fn unchanged_member_keeps_its_factor() {
     assert!(z.factor_member(&zero, 0.0, &[], &st).is_err());
     assert!(
         z.factor_member(&zero, 0.0, &[], &st).is_err(),
-        "no memo of a failure"
+        "a failed factorization holds a member"
     );
 }
 
@@ -231,14 +219,14 @@ fn entry_rows_products_match_dense() {
     let xa: Vec<f64> = x.iter().map(|v| v.norm()).collect();
     let mut ya = vec![0.0; f.n];
     e.abs_mul_into(vals, &xa, &mut ya);
-    // a row sums at most its entries' count of products: their rounding
     let u = f64::EPSILON;
     for r in 0..f.n {
         let terms: f64 = (0..vals.len())
             .filter(|&k| rows[k] == r)
             .map(|k| vals[k].abs() * x[cols[k]].norm())
             .sum();
-        let tol = 4.0 * vals.len() as f64 * u * terms;
+        let products_in_row_at_most = vals.len() as f64;
+        let tol = 4.0 * products_in_row_at_most * u * terms;
         let want_r: f64 = (0..vals.len())
             .filter(|&k| rows[k] == r)
             .map(|k| vals[k] * xr[cols[k]])
@@ -251,8 +239,6 @@ fn entry_rows_products_match_dense() {
     assert!(EntryRows::new(2, &[0], &[0, 1]).is_err());
 }
 
-/// A pencil of `n` rows with `deg` entries per row in each term, large
-/// enough that its fill and products go wide on several threads.
 fn large(n: usize, deg: usize) -> Pencil {
     let mut t: [(Vec<usize>, Vec<usize>); 2] = Default::default();
     for (s, (rows, cols)) in t.iter_mut().enumerate() {
@@ -302,8 +288,6 @@ fn same_bits_on_one_and_several_threads() {
     }
 }
 
-/// A member's fill is the scatter of its entries in the layout's order:
-/// `A0`, `alpha` times `A1`, `E`.
 #[test]
 fn fill_is_the_scatter_of_the_member() {
     let f = family();
@@ -317,5 +301,8 @@ fn fill_is_the_scatter_of_the_member() {
     p.layout().scatter(&entries, &mut want);
     let mut got = vec![C::new(0.0, 0.0); p.layout().nnz()];
     p.fill(alpha, &extra, &mut got);
-    assert_eq!(got, want);
+    assert_eq!(
+        got, want,
+        "the fill is not the scatter of A0, alpha A1 and E in the layout's order"
+    );
 }

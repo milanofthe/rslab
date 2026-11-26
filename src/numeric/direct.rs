@@ -18,13 +18,9 @@ use crate::scalar::Scalar;
 /// serves any direct solver and any number of right-hand sides; a thread
 /// that solves concurrently keeps its own.
 pub struct SolveWork<T> {
-    /// The right-hand side block in the factor's order.
     pub(crate) y: Vec<T>,
-    /// One row of a block, staged apart from the rows it updates.
     pub(crate) row: Vec<T>,
-    /// The supernodal sweeps' scratch.
     pub(crate) plan: crate::numeric::supernodal::solve::PlanWork<T>,
-    /// The KLU supernode kernel's gather, all-zero between its uses.
     pub(crate) gather: Vec<T>,
 }
 
@@ -45,11 +41,7 @@ impl<T> SolveWork<T> {
     }
 }
 
-/// The solve works a solver keeps for its own `solve*` calls: a call takes
-/// one and gives it back, so every solve after the first allocates nothing
-/// and touches no fresh memory (a near-field LU's multi right-hand side
-/// solve spent about a fifth of its time setting up a fresh work). As many
-/// as calls run at once; held as long as the solver, empty in a clone.
+// https://github.com/milanofthe/rslab/issues/290
 pub(crate) struct WorkPool<T>(std::sync::Mutex<Vec<SolveWork<T>>>);
 
 impl<T> Default for WorkPool<T> {
@@ -71,7 +63,6 @@ impl<T> std::fmt::Debug for WorkPool<T> {
 }
 
 impl<T> WorkPool<T> {
-    /// `f` on a work of the pool, given back after.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&mut SolveWork<T>) -> R) -> R {
         let mut w = self
             .0
@@ -85,7 +76,6 @@ impl<T> WorkPool<T> {
     }
 }
 
-/// The part of a direct solver the shared entry points build on.
 pub(crate) trait SolveCore<T: Scalar> {
     /// The path's name in log records.
     const NAME: &'static str;
@@ -118,9 +108,7 @@ pub(crate) trait SolveCore<T: Scalar> {
     fn perturbations(&self) -> &[PivotFloor<T>];
 }
 
-/// A determinant as `phase * exp(log_abs)`: a product of many pivots
-/// neither under- nor overflows in this form. `phase` has unit modulus
-/// (`+-1` for a real field), or is zero for a zero factor.
+// https://github.com/milanofthe/rslab/issues/290
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LogDet<T> {
     phase: T,
@@ -135,7 +123,6 @@ impl<T: Scalar> LogDet<T> {
         }
     }
 
-    /// Multiply by `v`.
     pub(crate) fn mul(&mut self, v: T) {
         let m = v.magnitude();
         if m == 0.0 {
@@ -143,24 +130,20 @@ impl<T: Scalar> LogDet<T> {
             self.log_abs = f64::NEG_INFINITY;
             return;
         }
-        // Renormalized every step, so the phase stays on the unit circle.
         let p = self.phase * v * T::from_real(1.0 / m);
         self.phase = p * T::from_real(1.0 / p.magnitude().max(f64::MIN_POSITIVE));
         self.log_abs += m.ln();
     }
 
-    /// Divide by `v`.
     pub(crate) fn div(&mut self, v: T) {
         let m = v.magnitude();
         self.mul(v.conj() * T::from_real(1.0 / (m * m)));
     }
 
-    /// Divide by the positive real `s` (a scaling).
     pub(crate) fn div_scale(&mut self, s: f64) {
         self.log_abs -= s.ln();
     }
 
-    /// Multiply by the sign of the permutation `p`.
     pub(crate) fn permutation(&mut self, p: &[usize]) {
         let mut seen = vec![false; p.len()];
         let mut odd = false;
@@ -186,8 +169,6 @@ impl<T: Scalar> LogDet<T> {
     }
 }
 
-/// [`SolveCore::log_det_raw`], refused for a statically perturbed factor:
-/// its determinant is that of the perturbed matrix.
 pub(crate) fn log_det<T: Scalar, S: SolveCore<T>>(
     s: &S,
     n_perturbed: usize,
@@ -201,7 +182,6 @@ pub(crate) fn log_det<T: Scalar, S: SolveCore<T>>(
     Ok(s.log_det_raw()?.parts())
 }
 
-/// The dense inverse, column-major, as one block solve against the identity.
 pub(crate) fn inverse<T: Scalar, S: SolveCore<T>>(s: &S) -> Result<Vec<T>, RslabError> {
     let n = s.dim();
     let mut e = vec![T::zero(); n * n];
@@ -211,8 +191,6 @@ pub(crate) fn inverse<T: Scalar, S: SolveCore<T>>(s: &S) -> Result<Vec<T>, Rslab
     solve(s, &e, n, false)
 }
 
-/// Counts a solve of `rhs` right-hand sides with `steps` refinement steps on
-/// the factor and at the current scope.
 pub(crate) fn record<T: Scalar, S: SolveCore<T>>(s: &S, rhs: usize, steps: usize) {
     s.counter().record(rhs, steps);
     rsprobe::add!("rhs", rhs);
@@ -233,15 +211,9 @@ fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
     Ok(())
 }
 
-/// What a permuted, scaled copy costs per entry.
 static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
-/// The block a solve's sweeps take, row-major (`y[e * nrhs + c]`), from the
-/// column-major right-hand sides `b`: row `e` is row `rows[e]` of `b`
-/// times `scale[rows[e]]`. On the pool its solve runs on (`pool`), as wide as
-/// the copy is worth there, else on this thread; every entry is the same
-/// product either way.
 pub(crate) fn gather_scaled<T: Scalar>(
     b: &[T],
     nrhs: usize,
@@ -280,10 +252,6 @@ pub(crate) fn gather_scaled<T: Scalar>(
     unsafe { y.set_len(n * nrhs) };
 }
 
-/// The solution from a solve's sweeps' block `y` (row-major, see
-/// [`gather_scaled`]): row `rows[e]` of the column-major `x` is row `e` of
-/// `y` times `scale[rows[e]]`. On the pool its solve runs on (`pool`), as
-/// [`gather_scaled`]; every entry is the same product either way.
 pub(crate) fn scatter_scaled<T: Scalar>(
     y: &[T],
     nrhs: usize,
@@ -343,7 +311,6 @@ pub(crate) fn solve<T: Scalar, S: SolveCore<T>>(
     Ok(x)
 }
 
-/// [`solve_into`] on a work of the solver's own pool.
 pub(crate) fn solve_pooled_into<T: Scalar, S: SolveCore<T>>(
     s: &S,
     b: &[T],
@@ -367,10 +334,10 @@ where
     A: RefineOperator<T> + ?Sized,
 {
     let n = s.dim();
-    if a.dim() != n {
+    if a.n() != n {
         return Err(RslabError::DimensionMismatch {
             expected: n,
-            got: a.dim(),
+            got: a.n(),
         });
     }
     check(n, b.len(), 1)?;
@@ -554,7 +521,6 @@ macro_rules! direct_solver {
         impl<$($lt,)? T: $crate::scalar::Scalar> $crate::Preconditioner<T>
             for $solver<$($lt,)? T>
         {
-            // straight into `z`, on a work of the solver's own pool
             fn apply(&self, r: &[T], z: &mut [T]) -> Result<(), $crate::RslabError> {
                 $crate::numeric::direct::solve_pooled_into(self, r, 1, false, z)
             }

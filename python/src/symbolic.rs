@@ -5,10 +5,7 @@
 use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use rslab::{
-    CscMatrix, GeneralCsc, KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, RslabError,
-    SolverSettings,
-};
+use rslab::{KluSolver, KluSymbolic, LdltSymbolic, LuSymbolic, SolverSettings};
 
 use crate::common::{
     heavy, map_err, memory_estimate_dict, memory_plan_dict, vector, with_dtype, with_dtype_name,
@@ -16,10 +13,6 @@ use crate::common::{
 };
 use crate::factor::{Auto, Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
-
-// ---------------------------------------------------------------------------
-// LDL^T
-// ---------------------------------------------------------------------------
 
 /// Analysis of a symmetric pattern (ordering, elimination tree, supernodes),
 /// from :func:`rslab.analyze` with ``path='ldlt'``. Factor any value set on
@@ -29,14 +22,6 @@ pub struct PyLdltSymbolic {
     sym: LdltSymbolic,
     pattern: Pattern,
     settings: PySettings,
-}
-
-fn analyze_ldlt_core<T: Field>(
-    a: &CscMatrix<T>,
-    st: &PySettings,
-) -> Result<(LdltSymbolic, SolverSettings), RslabError> {
-    let opts = st.resolved();
-    Ok((LdltSymbolic::analyze(a, &opts)?, opts))
 }
 
 fn adopt(st: &PySettings, opts: SolverSettings) -> PySettings {
@@ -243,7 +228,8 @@ pub fn analyze_ldlt(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.csc::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LdltSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(PyLdltSymbolic {
             sym,
             pattern,
@@ -268,16 +254,13 @@ pub fn ldlt_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.csc::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_ldlt_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LdltSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(Ldlt {
             inner: T::ldlt_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
         })
     })
 }
-
-// ---------------------------------------------------------------------------
-// LU
-// ---------------------------------------------------------------------------
 
 /// Analysis of a general pattern for the supernodal LU path, from
 /// :func:`rslab.analyze` with ``path='lu'``. Factor any value set on the
@@ -287,14 +270,6 @@ pub struct PyLuSymbolic {
     sym: LuSymbolic,
     pattern: Pattern,
     settings: PySettings,
-}
-
-fn analyze_lu_core<T: Field>(
-    a: &GeneralCsc<T>,
-    st: &PySettings,
-) -> Result<(LuSymbolic, SolverSettings), RslabError> {
-    let opts = st.resolved();
-    Ok((LuSymbolic::analyze(a, &opts)?, opts))
 }
 
 #[pymethods]
@@ -492,7 +467,8 @@ pub fn analyze_lu(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.general::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LuSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(PyLuSymbolic {
             sym,
             pattern,
@@ -517,16 +493,13 @@ pub fn lu_factor(
     let pattern = Pattern::from_py(n, &indptr, &indices)?;
     with_dtype!(data, |T| {
         let a = pattern.general::<T>(vector(data, "data")?)?;
-        let (sym, opts) = heavy(py, || analyze_lu_core(&a, &st)).map_err(map_err)?;
+        let opts = st.resolved();
+        let sym = heavy(py, || LuSymbolic::analyze(&a, &opts)).map_err(map_err)?;
         Ok(Lu {
             inner: T::lu_factor(py, &sym, a, &opts, st.factor_dtype.as_deref())?,
         })
     })
 }
-
-// ---------------------------------------------------------------------------
-// KLU
-// ---------------------------------------------------------------------------
 
 /// Analysis of a general pattern for the KLU path (block triangular form,
 /// per-block AMD), from :func:`rslab.analyze` with ``path='klu'``. Factor any
@@ -765,10 +738,6 @@ pub fn klu_factor(
     })
 }
 
-// ---------------------------------------------------------------------------
-// The automatic path
-// ---------------------------------------------------------------------------
-
 /// The automatic path's settings: the supernodal paths' (``settings`` and
 /// the keywords, also returned as given), KLU's, and the routing between
 /// them.
@@ -801,7 +770,6 @@ pub struct PyAutoSymbolic {
     sym: std::sync::Arc<rslab::AutoSymbolic>,
     pattern: Pattern,
     settings: rslab::AutoSettings,
-    /// The supernodal settings as given, the defaults of :meth:`memory_plan`.
     supernodal: PySettings,
 }
 

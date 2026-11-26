@@ -25,9 +25,7 @@ fn best<R>(reps: usize, mut f: impl FnMut() -> R) -> (f64, R) {
     (t_best, out.unwrap())
 }
 
-/// Factor throughput: million unknowns and Gflop (the analysis's flop
-/// estimate) per second of the factorization's `secs`.
-fn rates(n: usize, d: &rslab::Diagnostics, secs: f64) -> (f64, f64) {
+fn mdof_gflop_rates(n: usize, d: &rslab::Diagnostics, secs: f64) -> (f64, f64) {
     let flops = d.estimate.map_or(0, |e| e.factor_flops) as f64;
     (n as f64 / secs / 1e6, flops / secs / 1e9)
 }
@@ -55,7 +53,6 @@ fn main() {
         ("amf", Some(OrderingMethod::Amf)),
         ("metis", Some(OrderingMethod::MetisND)),
     ];
-    // `MTX_ORDERINGS=metis,auto` restricts the orderings (large matrices).
     let only = std::env::var("MTX_ORDERINGS").ok();
     let orderings: Vec<_> = orderings
         .into_iter()
@@ -69,7 +66,6 @@ fn main() {
             let n = a.n;
             let real = a.values.iter().all(|v| v.im == 0.0);
             if real {
-                // Real symmetric: the f64 path (half the arithmetic of the complex one).
                 let ar = rslab::CscMatrix {
                     n,
                     col_ptr: a.col_ptr.clone(),
@@ -110,7 +106,7 @@ fn main() {
                     let (ta, sym) = best(reps, || LdltSymbolic::analyze(&ar, &opts).unwrap());
                     let (tf, s) = best(reps, || sym.factor(&ar, &opts).unwrap());
                     let (t_all, ana) = (ta + tf, ta * 1e3);
-                    let (mdof, gf) = rates(n, &s.diagnostics(), tf);
+                    let (mdof, gf) = mdof_gflop_rates(n, &s.diagnostics(), tf);
                     let (ts, x) = best(5, || s.solve(&b).unwrap());
                     let bb: Vec<f64> = (0..n * 8).map(|k| ((k * 11) % 17) as f64 - 8.0).collect();
                     let (t8, _) = best(3, || s.solve_many(&bb, 8).unwrap());
@@ -167,7 +163,7 @@ fn main() {
                 let (ta, sym) = best(reps, || LdltSymbolic::analyze(&a, &opts).unwrap());
                 let (tf, s) = best(reps, || sym.factor(&a, &opts).unwrap());
                 let (t_all, ana) = (ta + tf, ta * 1e3);
-                let (mdof, gf) = rates(n, &s.diagnostics(), tf);
+                let (mdof, gf) = mdof_gflop_rates(n, &s.diagnostics(), tf);
                 let (ts, x) = best(5, || s.solve(&b).unwrap());
                 let bb: Vec<C> = (0..n * 8)
                     .map(|k| C::new(((k * 11) % 17) as f64 - 8.0, 0.0))
@@ -201,7 +197,6 @@ fn main() {
             let b: Vec<C> = (0..n)
                 .map(|i| C::new(((i * 7) % 13) as f64 - 6.0, 0.0))
                 .collect();
-            // KLU variants: pivot tolerance and BTF.
             for (label, settings) in [
                 ("klu", KluSettings::default()),
                 ("klu-p1", KluSettings::default().with_pivot_threshold(1.0)),
@@ -227,9 +222,6 @@ fn main() {
                 println!("{label:>9} nnzLU={:>9} blocks={:>6} | analyze {:>7.2} ms factor {:>8.2} ms ({:.2} MDOF/s) refactor {:>8.2} ms ({:.2} MDOF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={res:.1e}",
                     k.factor_nnz(), k.n_blocks(), ta * 1e3, tf * 1e3, n as f64 / tf / 1e6, tr * 1e3, n as f64 / tr / 1e6, ts * 1e3, n as f64 / ts / 1e6);
             }
-            // Real-valued runs when the file is real: the general Matrix
-            // Market loader always yields complex values, but a circuit's
-            // matrix is real and that is what the KLU comparisons measure.
             if a.values.iter().all(|v| v.im == 0.0) {
                 let ar = rslab::GeneralCsc {
                     n: a.n,
@@ -259,7 +251,6 @@ fn main() {
                 println!("  klu-f64 nnzLU={:>9} blocks={:>6} | analyze {:>7.2} ms factor {:>8.2} ms ({:.2} MDOF/s) refactor {:>8.2} ms ({:.2} MDOF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={res:.1e}",
                     k.factor_nnz(), k.n_blocks(), ta * 1e3, tf * 1e3, n as f64 / tf / 1e6, tr * 1e3, n as f64 / tr / 1e6, ts * 1e3, n as f64 / ts / 1e6);
             }
-            // Symbolic view of the KLU analysis: predicted vs actual fill.
             {
                 let sym = rslab::KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
                 let k = sym.factor(&a, &KluSettings::default()).unwrap();
@@ -276,7 +267,6 @@ fn main() {
                     println!("          warning: {w}");
                 }
             }
-            // LU with full partial pivoting and refinement, for the accuracy picture.
             {
                 let s = LuSolver::factor(&a, &SolverSettings::default().with_pivot_threshold(1.0))
                     .unwrap();
@@ -319,7 +309,7 @@ fn main() {
                     println!("{name:>7} lu failed");
                     continue;
                 };
-                let (mdof, gf) = rates(n, &s.diagnostics(), tf);
+                let (mdof, gf) = mdof_gflop_rates(n, &s.diagnostics(), tf);
                 let (ts, x) = best(5, || s.solve(&b).unwrap());
                 println!("{:>7} nnzLU={:>9} fill={:>5.1} | analyze {:>8.0} ms factor {:>8.1} ms ({mdof:.2} MDOF/s, {gf:.1} GF/s) solve {:>7.3} ms ({:.1} MDOF/s) res={:.1e}",
                     format!("lu-{name}"), s.factor_nnz(), s.factor_nnz() as f64 / a.values.len() as f64,

@@ -5,9 +5,9 @@
 
 use super::LdltSolver;
 use crate::error::RslabError;
-#[cfg(test)]
+#[cfg(all(test, feature = "matgen"))]
 use crate::numeric::ldlt::LdltPivots;
-#[cfg(test)]
+#[cfg(all(test, feature = "matgen"))]
 use crate::numeric::supernodal::solve::SolvePlan;
 use crate::numeric::supernodal::solve::SparseReach;
 use crate::scalar::Scalar;
@@ -62,8 +62,7 @@ impl<T: Scalar> LdltSolver<T> {
         Ok(z)
     }
 
-    /// The solve plan, the block diagonal and the equilibration (tests).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "matgen"))]
     pub(crate) fn parts(&self) -> (&SolvePlan<T>, &LdltPivots<T>, &[f64]) {
         (&self.plan, &self.factors, &self.scale)
     }

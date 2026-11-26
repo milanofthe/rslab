@@ -45,7 +45,6 @@ pub fn fetch(group: &str, name: &str) -> Result<PathBuf, String> {
             .path()
             .map_err(|e| format!("entry path: {e}"))?
             .into_owned();
-        // The main matrix is `<name>/<name>.mtx`; skip rhs/coord/solution siblings.
         let is_main = path
             .file_name()
             .map(|f| f.to_string_lossy() == format!("{name}.mtx"))
@@ -58,24 +57,6 @@ pub fn fetch(group: &str, name: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!("no {name}.mtx found in archive {url}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    /// End-to-end network test (run explicitly: `--ignored`). Fetches a small real
-    /// SPD matrix and checks it is a valid Matrix Market file.
-    #[test]
-    #[ignore = "requires network access to sparse.tamu.edu"]
-    fn fetch_small_real_matrix() {
-        let p = fetch("HB", "bcsstk14").expect("download bcsstk14");
-        assert!(p.exists());
-        let s = std::fs::read_to_string(&p).expect("read cached mtx");
-        assert!(
-            s.starts_with("%%MatrixMarket"),
-            "valid Matrix Market header"
-        );
-    }
 }
 
 /// A small curated set of real SuiteSparse matrices spanning the benchmark axes
@@ -100,4 +81,20 @@ pub fn suggested() -> &'static [(&'static str, &'static str, &'static str)] {
         ),
         ("Williams", "cant", "SPD FEM, large, dense-ish"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires network access to sparse.tamu.edu"]
+    fn fetch_small_real_matrix() {
+        let p = fetch("HB", "bcsstk14").expect("download bcsstk14");
+        assert!(p.exists());
+        let s = std::fs::read_to_string(&p).expect("read cached mtx");
+        assert!(
+            s.starts_with("%%MatrixMarket"),
+            "valid Matrix Market header"
+        );
+    }
 }

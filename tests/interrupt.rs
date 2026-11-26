@@ -26,8 +26,6 @@ fn convdiff(k: usize) -> rslab::GeneralCsc<C> {
     fem::convection_diffusion::<C>(&[k, k], 5e-3, fem::Flow::Rotating, true)
 }
 
-/// A pre-armed flag is observed at the first boundary, so the outcome is
-/// deterministic and does not race a watchdog.
 #[test]
 fn armed_flag_interrupts_every_path() {
     let flag = Arc::new(AtomicBool::new(true));
@@ -35,19 +33,26 @@ fn armed_flag_interrupts_every_path() {
     let a = helmholtz(12);
     let s = SolverSettings::default().with_interrupt(flag.clone());
     let sym = LdltSymbolic::analyze(&a, &s).unwrap();
-    assert!(matches!(sym.factor(&a, &s), Err(RslabError::Interrupted)));
+    assert!(
+        matches!(sym.factor(&a, &s), Err(RslabError::Interrupted)),
+        "the LDL^T factor runs past an armed flag"
+    );
 
     let b = convdiff(40);
     let sym = LuSymbolic::analyze(&b, &s).unwrap();
-    assert!(matches!(sym.factor(&b, &s), Err(RslabError::Interrupted)));
+    assert!(
+        matches!(sym.factor(&b, &s), Err(RslabError::Interrupted)),
+        "the LU factor runs past an armed flag"
+    );
 
     let ks = KluSettings::default().with_interrupt(flag.clone());
     let sym = KluSymbolic::analyze(&b, &KluSettings::default()).unwrap();
-    assert!(matches!(sym.factor(&b, &ks), Err(RslabError::Interrupted)));
+    assert!(
+        matches!(sym.factor(&b, &ks), Err(RslabError::Interrupted)),
+        "the KLU factor runs past an armed flag"
+    );
 }
 
-/// Clearing the flag restores a clean factorization: no state is left behind by
-/// the interrupted attempt.
 #[test]
 fn cleared_flag_factors_cleanly() {
     let flag = Arc::new(AtomicBool::new(true));
@@ -62,23 +67,18 @@ fn cleared_flag_factors_cleanly() {
         .expect("re-factor after clearing the flag");
     let rhs = vec![C::new(1.0, 0.0); a.n];
     let x = f.solve(&rhs).unwrap();
-    let mut ax = vec![C::new(0.0, 0.0); a.n];
-    a.symv(&x, &mut ax);
-    let num: f64 = ax
-        .iter()
-        .zip(&rhs)
-        .map(|(p, q)| (*p - *q).norm_sqr())
-        .sum::<f64>()
-        .sqrt();
-    assert!(num.sqrt() < 1e-6, "residual after the clean re-factor");
+    let clean = sym.factor(&a, &SolverSettings::default()).unwrap();
+    assert_eq!(
+        x,
+        clean.solve(&rhs).unwrap(),
+        "the re-factor solves as a factor that was never interrupted"
+    );
 }
 
-/// Armed mid-flight from another thread: the factor must return `Interrupted`
-/// rather than run to completion. The matrix is large enough that a 20 ms delay
-/// lands well inside the factorization.
 #[test]
 fn flag_set_during_the_factor_stops_it() {
     let a = helmholtz(34);
+    let watchdog_delay = std::time::Duration::from_millis(20);
     let flag = Arc::new(AtomicBool::new(false));
     let s = SolverSettings::default().with_interrupt(flag.clone());
     let sym = LdltSymbolic::analyze(&a, &s).unwrap();
@@ -86,7 +86,7 @@ fn flag_set_during_the_factor_stops_it() {
     let watchdog = {
         let flag = flag.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(watchdog_delay);
             flag.store(true, Ordering::Relaxed);
         })
     };
@@ -99,7 +99,6 @@ fn flag_set_during_the_factor_stops_it() {
     );
 }
 
-/// An unarmed flag changes nothing: same factor, bit for bit.
 #[test]
 fn unarmed_flag_is_bit_identical() {
     let a = helmholtz(14);
@@ -120,13 +119,19 @@ fn unarmed_flag_is_bit_identical() {
         .solve(&rhs)
         .unwrap();
     for (p, q) in x0.iter().zip(&x1) {
-        assert_eq!(p.re.to_bits(), q.re.to_bits());
-        assert_eq!(p.im.to_bits(), q.im.to_bits());
+        assert_eq!(
+            p.re.to_bits(),
+            q.re.to_bits(),
+            "an unarmed flag changes the bits"
+        );
+        assert_eq!(
+            p.im.to_bits(),
+            q.im.to_bits(),
+            "an unarmed flag changes the bits"
+        );
     }
 }
 
-/// The flag armed for the factorization is carried into the factors, so a KLU
-/// refactor on them observes it too.
 #[test]
 fn klu_refactor_observes_the_stored_flag() {
     let b = convdiff(40);
@@ -136,7 +141,10 @@ fn klu_refactor_observes_the_stored_flag() {
     let mut f = sym.factor(&b, &ks).expect("clean factor while unarmed");
 
     flag.store(true, Ordering::Relaxed);
-    assert!(matches!(f.refactor(&b), Err(RslabError::Interrupted)));
+    assert!(
+        matches!(f.refactor(&b), Err(RslabError::Interrupted)),
+        "the KLU refactor does not observe the flag stored in the factors"
+    );
 
     flag.store(false, Ordering::Relaxed);
     f.refactor(&b).expect("refactor after clearing the flag");

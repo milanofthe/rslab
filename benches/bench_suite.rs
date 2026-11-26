@@ -16,7 +16,6 @@
 //! `RLA_BENCH_OUT=path.jsonl`, `RAYON_NUM_THREADS=N` (threads, also drives faer/MKL).
 //!
 //! Run via the driver; standalone: `cargo bench --bench bench_suite --features matgen`.
-// CSC/COO conversion loops use the index as a value (col_ptr[c], next[c]).
 #![allow(clippy::needless_range_loop)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -39,7 +38,6 @@ use rslab::{read_mtx_any, MtxLoaded};
 
 type C = Complex<f64>;
 
-// ---- live-bytes counting allocator (memory pass only) ------------------------
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -73,7 +71,6 @@ fn live_peak<R>(f: impl FnOnce() -> R) -> (R, f64) {
     )
 }
 
-// ---- MKL PARDISO FFI (mtype 6 symmetric / 13 unsymmetric) --------------------
 type PardisoFn = unsafe extern "C" fn(
     *mut i64,
     *const i32,
@@ -175,15 +172,6 @@ impl Drop for Pardiso {
     }
 }
 
-// ---- Apple Accelerate Sparse Solvers (macOS 15.5+, bench-only FFI) -----------
-// The public API is inline overloadable C, so `benches/accel_shim.c` compiles it
-// into a small dylib with a plain ABI, built on demand with the system `cc` and
-// loaded via libloading - the same runtime-FFI pattern as MKL PARDISO above.
-// Accelerate's complex sparse LDLT is Hermitian-only (verified empirically: a
-// complex-symmetric lower triangle is mirrored with conjugation), so the
-// complex-symmetric family goes through its LU on the full matrix instead;
-// real-valued symmetric matrices keep the structure-exploiting LDLT. Accelerate
-// has no thread knob - it parallelizes internally (its shipped default).
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct AccelResult {
@@ -201,19 +189,21 @@ struct AccelResult {
 
 #[allow(clippy::type_complexity)]
 type AccelFn = unsafe extern "C" fn(
-    i32,                         // n
-    *const std::os::raw::c_long, // col_ptr (n+1)
-    *const i32,                  // row_idx
-    *const C,                    // values ({re,im} = double _Complex layout)
-    i32,                         // 0 ordinary / 1 symmetric / 2 hermitian (lower)
-    i32,                         // SparseFactorization_t (1 LDLT, 80 LU, 40 QR)
-    i32,                         // SparseOrder_t, -1 = default
-    f64,                         // pivot tolerance, <0 = vendor default (0.01)
-    i64,                         // memory gate [bytes]; >0 -> -100 if a-priori over
-    *const C,                    // b
-    *mut C,                      // x
-    *mut AccelResult,
+    n: i32,
+    col_ptr: *const std::os::raw::c_long,
+    row_idx: *const i32,
+    vals: *const C,
+    symmetric: i32,
+    fact_type: i32,
+    order: i32,
+    pivot_tol: f64,
+    max_bytes: i64,
+    b: *const C,
+    x: *mut C,
+    out: *mut AccelResult,
 ) -> i32;
+
+const ACCEL_ORDER_BAKEOFF: i32 = -2;
 
 struct Accel {
     _lib: libloading::Library,
@@ -221,8 +211,6 @@ struct Accel {
 }
 
 impl Accel {
-    /// Compile the shim if missing/stale and load it. None (with a note) if this
-    /// is not macOS, `cc` fails, or the symbol is absent.
     fn try_new() -> Option<Self> {
         if !cfg!(target_os = "macos") {
             eprintln!("[accel] skipped: Apple Accelerate is macOS-only");
@@ -301,8 +289,6 @@ impl Accel {
     }
 }
 
-// ---- CSC/CSR helpers ---------------------------------------------------------
-/// Full CSR (0-based) of an unsymmetric `GeneralCsc` - for PARDISO mtype 13.
 fn full_csr(a: &GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
     let mut ia = vec![0i32; n + 1];
@@ -327,11 +313,8 @@ fn full_csr(a: &GeneralCsc<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     (ia, ja, va)
 }
 
-/// Upper-triangle CSR (0-based) from a lower-triangle symmetric `CscMatrix` - for
-/// PARDISO mtype 6. A lower entry `(r,c)` (r>=c) maps to the upper CSR cell `(c,r)`.
 fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let n = a.n;
-    // row of the upper-CSR = original column c; count per c.
     let mut ia = vec![0i32; n + 1];
     for c in 0..n {
         ia[c + 1] += (a.col_ptr[c + 1] - a.col_ptr[c]) as i32;
@@ -344,9 +327,10 @@ fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     let mut next = ia.clone();
     for c in 0..n {
         for k in a.col_ptr[c]..a.col_ptr[c + 1] {
-            let r = a.row_idx[k]; // r >= c
+            let r = a.row_idx[k];
+            debug_assert!(r >= c);
             let d = next[c] as usize;
-            ja[d] = r as i32; // upper: col = r >= row = c
+            ja[d] = r as i32;
             va[d] = a.values[k];
             next[c] += 1;
         }
@@ -354,8 +338,6 @@ fn upper_csr(a: &CscMatrix<C>) -> (Vec<i32>, Vec<i32>, Vec<C>) {
     (ia, ja, va)
 }
 
-/// Full unsymmetric `GeneralCsc` from a lower-triangle symmetric `CscMatrix`
-/// (`A = A^T`, complex-symmetric, no conjugate) - for faer's LU.
 fn sym_to_full(a: &CscMatrix<C>) -> GeneralCsc<C> {
     let n = a.n;
     let mut rows = Vec::with_capacity(a.values.len() * 2);
@@ -421,8 +403,6 @@ fn emit(
     );
 }
 
-/// A test system: symmetric (-> LDL^T / PARDISO mtype 6) or unsymmetric (-> LU /
-/// mtype 13). faer always factors the full matrix as LU.
 enum Mat {
     Sym(CscMatrix<C>),
     Unsym(GeneralCsc<C>),
@@ -448,23 +428,10 @@ impl Mat {
     }
 }
 
-/// Deterministic xorshift (the klu_circuit generator's RNG).
-struct Rng(u64);
-impl Rng {
-    fn next_f64(&mut self) -> f64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 >> 11) as f64 / (1u64 << 53) as f64 - 0.5
-    }
-}
+#[path = "../tests/common/xorshift.rs"]
+mod xorshift;
+use xorshift::Rng;
 
-/// MNA-like circuit matrix (see `benches/klu_circuit.rs`): `n` nodes in
-/// `n_stages` cascaded stages (one-way inter-stage feed -> reducible BTF),
-/// each stage internally coupled. The conductance part follows the klu_circuit
-/// generator exactly; on top the diagonal gets the AC small-signal `+ jomegaC`
-/// term (grounded capacitor per node), so the matrix is genuinely complex like
-/// a frequency-domain MNA system - the KLU sweep use-case.
 fn circuit_matrix(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<C> {
     let mut rng = Rng(seed | 1);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -505,11 +472,8 @@ fn circuit_matrix(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<C> {
             colsum[j] += g;
         }
     }
-    // Diagonal: conductance sum + dominance margin, plus the AC term jomegaC with a
-    // per-node grounded capacitance - keeps every column strictly dominant in
-    // modulus while making the values genuinely complex.
     for (j, &cs) in colsum.iter().enumerate() {
-        let margin = 0.1 + 0.1 * rng.next_f64().abs(); // klu_circuit's dominance margin
+        let margin = 0.1 + 0.1 * rng.next_f64().abs();
         let omega_c = 0.2 + 0.4 * rng.next_f64().abs();
         r.push(j);
         c.push(j);
@@ -547,23 +511,16 @@ fn run_matrix(
     let b = rhs(n);
     let has = |s: &str| solvers.iter().any(|x| x == s);
 
-    // A-priori memory estimate (validate against the measured live peak).
     if let Mat::Unsym(a) = mat {
         if let Ok(sym) = LuSymbolic::analyze(a, &SolverSettings::default()) {
             eprintln!("[bench] {name} a-priori {}", sym.estimate_memory::<C>());
         }
     }
 
-    // --- RLA untuned default + the raw left-looking kernel ---
-    // `default` is `SolverSettings::default()` through the high-level solver - the
-    // untuned baseline the learned tuner (`auto`) is measured against; `ll` runs
-    // the kernel on the benchmark's own options.
     for (tag, o) in [("default", SolverSettings::default()), ("ll", opts.clone())] {
         if !has(tag) {
             continue;
         }
-        // Error-tolerant: a singular / numerically hard corpus matrix must skip
-        // (with a note) rather than panic and abort the whole sweep.
         macro_rules! skip_err {
             ($what:expr, $r:expr) => {
                 match $r {
@@ -645,11 +602,6 @@ fn run_matrix(
         }
     }
 
-    // --- RLA heuristic-tuned (the default path: `LdltSolver::factor`) ---
-    // The heuristic picks the settings deterministically (adaptive ordering +
-    // default kernel knobs + exact ND bakeoff); `ana` includes the pick + analysis,
-    // `fac` is the factor-only time with the chosen settings - comparable to
-    // ll/mf/pardiso.
     if has("auto") {
         let res: Result<(), rslab::RslabError> = (|| {
             match mat {
@@ -723,11 +675,6 @@ fn run_matrix(
         }
     }
 
-    // --- faer (full LU) --- memory-gated: faer factors the FULL matrix as a complex
-    // LU (several x the memory of RSLAB's structure-exploiting factor), so skip it
-    // when RSLAB's *a-priori* transient estimate already implies faer would blow the
-    // budget (dogfooding the estimator) or above a generous n cap. RSLAB + PARDISO
-    // still run. Tunable via RLA_BENCH_FAER_MAX / RLA_BENCH_FAER_EST_MB.
     let faer_max: usize = std::env::var("RLA_BENCH_FAER_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -789,7 +736,6 @@ fn run_matrix(
         }
     }
 
-    // --- MKL PARDISO (mtype 6 symmetric / 13 unsymmetric) ---
     if has("pardiso") {
         let (mtype, ia, ja, va) = match mat {
             Mat::Sym(a) => {
@@ -820,9 +766,9 @@ fn run_matrix(
                 let e3 = ps.call(33, ni, &ia, &ja, &va, &mut bb, &mut x);
                 let slv = t.elapsed().as_secs_f64() * 1e3;
                 if e3 == 0 {
-                    // MKL self-reported peak memory (KB): max(iparm(15), iparm(16)+iparm(17)),
-                    // 0-based indices 14/15/16 - the analogue of the live-bytes peak.
-                    let peak_kb = ps.iparm[14].max(ps.iparm[15] + ps.iparm[16]);
+                    let (symbolic_peak_kb, symbolic_permanent_kb, numeric_kb) =
+                        (ps.iparm[14], ps.iparm[15], ps.iparm[16]);
+                    let peak_kb = symbolic_peak_kb.max(symbolic_permanent_kb + numeric_kb);
                     let mm = peak_kb.max(0) as f64 / 1024.0;
                     let fill = ps.iparm[17].max(0) as usize;
                     let mut ax = vec![Complex::new(0.0, 0.0); n];
@@ -852,10 +798,6 @@ fn run_matrix(
         }
     }
 
-    // --- RSLAB KLU path (circuit-shaped matrices) ---
-    // The shipped solver for the circuit class: BTF + per-block AMD + left-looking
-    // Gilbert-Peierls LU with threshold pivoting. Only meaningful on unsymmetric
-    // matrices; request it via RLA_BENCH_SOLVERS=klu for the circuit family.
     if has("klu") {
         if let Mat::Unsym(a) = mat {
             let ks = KluSettings::default().with_threads(opts.threads);
@@ -898,36 +840,19 @@ fn run_matrix(
         }
     }
 
-    // --- Apple Accelerate (Sparse Solvers, macOS 15.5+) ---
-    // Real-symmetric matrices (all-zero imaginary parts) run the structure-
-    // exploiting LDLT on the lower triangle (kind=Hermitian - identical to
-    // symmetric for real values, and the only variant the complex API factors
-    // correctly). Genuinely complex-symmetric matrices have no Accelerate LDLT
-    // analogue, so the vendor path is its new sparse LU on the full matrix
-    // (same structural handicap faer has). Unsymmetric matrices map 1:1 to LU.
-    // All runs stay in complex double - the same scalar type every other solver
-    // in this suite is measured with.
     if has("accel") {
         if let Some(ac) = Accel::try_new() {
-            // Default is the AMD-vs-Metis bakeoff (-2): SparseOrderDefault turned
-            // out to be plain AMD, which costs up to 4.4x the fill of Metis on the
-            // large EM/FEM systems - the bakeoff gives Accelerate its best
-            // ordering per matrix, mirroring RSLAB's exact ND bakeoff.
             let order: i32 = match std::env::var("RLA_BENCH_ACCEL_ORDER").ok().as_deref() {
                 Some("default") => -1,
                 Some("amd") => 2,
                 Some("metis") => 3,
                 Some("colamd") => 4,
-                _ => -2, // bakeoff
+                _ => ACCEL_ORDER_BAKEOFF,
             };
             let pivot: f64 = std::env::var("RLA_BENCH_ACCEL_PIVOT")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(-1.0);
-            // Memory gate: skip the numeric phase when Accelerate's own a-priori
-            // factor+workspace estimate (from its symbolic analysis) exceeds the
-            // budget - the analogue of the faer gate above, sized for a 16 GB
-            // Apple-Silicon machine by default.
             let gate_bytes: i64 = (std::env::var("RLA_BENCH_ACCEL_EST_MB")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
@@ -936,9 +861,6 @@ fn run_matrix(
             let mut x = vec![Complex::new(0.0, 0.0); n];
             let (variant, st, r) = match mat {
                 Mat::Sym(a) if a.values.iter().all(|v| v.im == 0.0) => {
-                    // Cholesky first (Accelerate's strongest path when the matrix
-                    // is SPD), LDLT fallback for the indefinite ones. Only the
-                    // succeeding attempt is reported - vendor-best-per-matrix.
                     let (st, r) = ac.solve(
                         n, &a.col_ptr, &a.row_idx, &a.values, 2, 0, order, pivot, gate_bytes, &b,
                         &mut x,
@@ -1025,15 +947,7 @@ fn run_matrix(
         }
     }
 
-    // --- RSLAB preconditioner mode (static pivoting, never-fail) + GMRES refinement.
-    // Factors a perturbed A_hat (never rank-deficient), then refines A x = b with GMRES
-    // preconditioned by that factor - so the indefinite / hard matrices where exact
-    // factorization fails are still solved. `slv_ms` here is the Krylov refinement cost.
     if has("pc") {
-        // floor 1e-4: regularizes the indefinite zero/tiny pivots enough for a
-        // well-conditioned preconditioner (GMRES then corrects back to A); a
-        // well-conditioned matrix has O(1) equilibrated pivots, so none are perturbed
-        // and pc reduces to the exact factor (1 GMRES step).
         let envf = |k: &str, d: f64| {
             std::env::var(k)
                 .ok()
@@ -1116,19 +1030,8 @@ fn run_matrix(
     }
 }
 
-/// Build the matrices for a family. `sym` = 3D Helmholtz (sparse stencil); `unsym`
-/// = BEM/MoM near-field kernel with a **density-matched** cutoff (~120 nnz/row at
-/// any `n`, like real MoM); `real` = the on-disk `precond_matrices` (smallest first).
 fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
     match family {
-        // Complex-symmetric distribution (LDL^T path): the three hard EM/FEM classes
-        // per size - Helmholtz (shifted, complex), curl-curl Maxwell (complex
-        // indefinite, gradient near-null-space), and Stokes/KKT saddle-point
-        // (symmetric indefinite). All genuinely complex-valued.
-        // One matrix per size, rotating through the classes/parameters, so every
-        // matrix lands at its own size (a continuous log-spaced `sizes` list then
-        // spreads points evenly over nnz rather than clustering them in equal-size
-        // batches). Eight class/parameter variants cycle across the sizes.
         "sym" => sizes
             .iter()
             .enumerate()
@@ -1163,12 +1066,6 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 }
             })
             .collect(),
-        // Unsymmetric distribution (LU path): convection-diffusion is the canonical
-        // sparse-unsymmetric class (advection-dominated, high grid-Peclet), in 3D and
-        // 2D, plus a BEM/MoM near-field kernel for the dense-ish contrast. All
-        // genuinely complex-valued.
-        // One matrix per size, rotating through the classes/parameters (see the
-        // symmetric family above) so points spread continuously over nnz.
         "unsym" => sizes
             .iter()
             .enumerate()
@@ -1211,12 +1108,6 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
                 }
             })
             .collect(),
-        // Circuit-shaped distribution (KLU path): MNA-like AC small-signal
-        // matrices - very sparse (~4-5 nnz/col), unsymmetric, column-diagonally
-        // dominant, cascaded stages giving a reducible BTF structure (the
-        // klu_circuit generator), made genuinely complex by the frequency-domain
-        // diagonal G + jomegaC. Stage count grows with size as in klu_circuit
-        // (8 @ 2k ... 64 @ 200k).
         "circuit" => sizes
             .iter()
             .map(|&sz| {
@@ -1259,17 +1150,8 @@ fn build_family(family: &str, sizes: &[usize]) -> Vec<(String, Mat)> {
     }
 }
 
-/// SuiteSparse validation corpus: download each `group/name`, auto-detect its type,
-/// and route symmetric -> LDL^T, general -> LU. Curated to be diverse (SPD / CFD /
-/// circuit / complex), non-singular, and memory-safe (n <= ~30k, run sequentially).
-/// Override with `RLA_BENCH_CORPUS` as a comma-separated `group/name` list. A
-/// matrix that fails to download/parse is skipped with a note.
 #[cfg(feature = "matgen-download")]
 fn build_corpus() -> Vec<(String, Mat)> {
-    // Default set spanning the axes; all comfortably < a few GB factored.
-    // Diverse, non-singular, ~1k-100k. (cryg10000 is a near-singular eigenvalue test
-    // matrix - no solver gets a small Ax=b residual - so it is omitted.) A name that
-    // fails to download is skipped with a note, so the list can be generous.
     const DEFAULT: &str = "\
         HB/bcsstk27,HB/bcsstk14,HB/bcsstk16,HB/bcsstk17,HB/bcsstk18,HB/bcsstk25,\
         Cylshell/s3rmt3m3,Boeing/msc10848,Boeing/crystk03,Boeing/bcsstk39,\
@@ -1347,10 +1229,7 @@ fn main() {
         .append(true)
         .open(&out_path)
         .expect("open RLA_BENCH_OUT");
-    // RLA now runs in a scoped pool of `opts.threads`; drive it from the sweep var.
     let mut opts = SolverSettings::default().with_threads(threads.max(1) as usize);
-    // Kernel-knob overrides for tuning sweeps on this machine:
-    // RLA_BENCH_NB=<panel width>, RLA_BENCH_GATES=<scalar,par_gemm,par_cdiv>.
     if let Ok(nb) = std::env::var("RLA_BENCH_NB") {
         if let Ok(nb) = nb.parse::<usize>() {
             opts.kernels.panel_nb = nb;
@@ -1365,8 +1244,6 @@ fn main() {
         }
     }
 
-    // Estimate-only mode (`RLA_BENCH_ESTIMATE=1`): emit the a-priori memory-estimate
-    // breakdown per matrix and skip all factoring (instant - no numeric work).
     let estimate_only = std::env::var("RLA_BENCH_ESTIMATE")
         .map(|v| v == "1")
         .unwrap_or(false);

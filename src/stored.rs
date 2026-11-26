@@ -43,7 +43,6 @@ enum Repr<T: Scalar> {
 }
 
 impl<T: Scalar> Default for Stored<T> {
-    /// Empty, in `T`.
     fn default() -> Self {
         Self::with_capacity(0, false)
     }
@@ -172,8 +171,6 @@ impl<T: Scalar> Stored<T> {
         }
     }
 
-    /// Both conjugated inner products `sum conj(self[from + i]) * u[i]` and
-    /// `... * w[i]` in one read of the values, each in order.
     #[inline]
     pub(crate) fn dotc2(&self, from: usize, u: &[T], w: &[T]) -> (T, T) {
         let to = from + u.len();
@@ -183,9 +180,6 @@ impl<T: Scalar> Stored<T> {
         }
     }
 
-    /// Its values up to `to` for the pieces of a parallel section ([`Rows`]): the
-    /// capacity reserved to `to`, the values from its length on not written yet
-    /// (the section writes them, [`written`](Self::written) then counts them).
     pub(crate) fn rows(&mut self, to: usize) -> Rows<T> {
         match &mut self.repr {
             Repr::Full(v) => {
@@ -199,15 +193,16 @@ impl<T: Scalar> Stored<T> {
         }
     }
 
-    /// Count the values up to `to` as written (it grows to `to` where it ends before).
-    ///
-    /// # Safety
-    /// Every value below `to` was written, through [`rows`](Self::rows) or before.
     pub(crate) unsafe fn written(&mut self, to: usize) {
-        match &mut self.repr {
-            Repr::Full(v) if v.len() < to => v.set_len(to),
-            Repr::Single(v) if v.len() < to => v.set_len(to),
-            _ => {}
+        debug_assert!(to <= self.capacity());
+        // SAFETY: the caller has written every value below `to`, through
+        // `rows` or before, and `to` is within the capacity that `rows` reserved.
+        unsafe {
+            match &mut self.repr {
+                Repr::Full(v) if v.len() < to => v.set_len(to),
+                Repr::Single(v) if v.len() < to => v.set_len(to),
+                _ => {}
+            }
         }
     }
 
@@ -230,7 +225,6 @@ impl<T: Scalar> Stored<T> {
     }
 }
 
-/// `sum conj(x[i]) * y[i]` in order, `x` stored in `E` and widened by `load`.
 #[inline]
 pub(crate) fn dotc_as<T: Scalar, E: Copy>(x: &[E], y: &[T], load: impl Fn(E) -> T) -> T {
     let mut s = T::zero();
@@ -240,7 +234,6 @@ pub(crate) fn dotc_as<T: Scalar, E: Copy>(x: &[E], y: &[T], load: impl Fn(E) -> 
     s
 }
 
-/// `out[i] += a * x[i]`, `x` stored in `E` and widened by `load`.
 #[inline]
 pub(crate) fn axpy_as<T: Scalar, E: Copy>(x: &[E], a: T, out: &mut [T], load: impl Fn(E) -> T) {
     for (o, &xi) in out.iter_mut().zip(x) {
@@ -248,8 +241,6 @@ pub(crate) fn axpy_as<T: Scalar, E: Copy>(x: &[E], a: T, out: &mut [T], load: im
     }
 }
 
-/// `(sum conj(x[i]) * u[i], sum conj(x[i]) * w[i])` in order, `x` stored in `E`, widened by
-/// `load` and read once.
 #[inline]
 fn dotc2_as<T: Scalar, E: Copy>(x: &[E], u: &[T], w: &[T], load: impl Fn(E) -> T) -> (T, T) {
     let (mut s, mut t) = (T::zero(), T::zero());
@@ -261,8 +252,6 @@ fn dotc2_as<T: Scalar, E: Copy>(x: &[E], u: &[T], w: &[T], load: impl Fn(E) -> T
     (s, t)
 }
 
-/// `u[i] += a * x[i]` and `w[i] += b * x[i]`, `x` stored in `E`, widened by `load` and read
-/// once.
 #[inline]
 fn axpy2_as<T: Scalar, E: Copy>(
     x: &[E],
@@ -277,9 +266,6 @@ fn axpy2_as<T: Scalar, E: Copy>(
     }
 }
 
-/// The values of a [`Stored`] ([`Stored::rows`]) shared by the pieces of a parallel section,
-/// each piece reading and writing values no other piece writes meanwhile. It holds no borrow:
-/// the [`Stored`] stays where it is (no write, no growth past the capacity) while it is used.
 #[derive(Debug)]
 pub(crate) enum Rows<T: Scalar> {
     Full(*mut T),
@@ -297,36 +283,40 @@ unsafe impl<T: Scalar> Send for Rows<T> {}
 unsafe impl<T: Scalar> Sync for Rows<T> {}
 
 impl<T: Scalar> Rows<T> {
-    /// `u[i] += a * self[from + i]` and `w[i] += b * self[from + i]`, the values read once.
-    ///
-    /// # Safety
-    /// The values `[from, from + u.len())` are written and no piece writes them meanwhile.
     #[inline]
     pub(crate) unsafe fn axpy2(self, from: usize, u: (T, &mut [T]), w: (T, &mut [T])) {
         let len = u.1.len();
-        match self {
-            Rows::Full(p) => axpy2_as(std::slice::from_raw_parts(p.add(from), len), u, w, |a| a),
-            Rows::Single(p) => axpy2_as(
-                std::slice::from_raw_parts(p.add(from), len),
-                u,
-                w,
-                T::promote,
-            ),
+        // SAFETY: the caller guarantees that the values `[from, from + len)` are
+        // written and that no piece writes them meanwhile, and the `Stored` that
+        // `rows` returned `self` for has neither moved nor grown since.
+        unsafe {
+            match self {
+                Rows::Full(p) => {
+                    axpy2_as(std::slice::from_raw_parts(p.add(from), len), u, w, |a| a)
+                }
+                Rows::Single(p) => axpy2_as(
+                    std::slice::from_raw_parts(p.add(from), len),
+                    u,
+                    w,
+                    T::promote,
+                ),
+            }
         }
     }
 
-    /// `self[from + i] = x[i]`, rounded to the storage.
-    ///
-    /// # Safety
-    /// The values `[from, from + x.len())` lie within the capacity and no other piece reads
-    /// or writes them meanwhile.
     #[inline]
     pub(crate) unsafe fn write(self, from: usize, x: &[T]) {
-        match self {
-            Rows::Full(p) => std::ptr::copy_nonoverlapping(x.as_ptr(), p.add(from), x.len()),
-            Rows::Single(p) => {
-                for (i, &a) in x.iter().enumerate() {
-                    p.add(from + i).write(a.demote());
+        // SAFETY: the caller guarantees that the values `[from, from + x.len())`
+        // lie within the capacity that `rows` reserved and that no other piece
+        // reads or writes them meanwhile, and the `Stored` has neither moved nor
+        // grown since.
+        unsafe {
+            match self {
+                Rows::Full(p) => std::ptr::copy_nonoverlapping(x.as_ptr(), p.add(from), x.len()),
+                Rows::Single(p) => {
+                    for (i, &a) in x.iter().enumerate() {
+                        p.add(from + i).write(a.demote());
+                    }
                 }
             }
         }
@@ -336,13 +326,11 @@ impl<T: Scalar> Rows<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::U32;
     use num_complex::Complex;
 
     type C = Complex<f64>;
 
-    /// Stored single, a value is off by at most the twin's unit roundoff relative to
-    /// its components, read and products widen exactly, the bytes halve; stored in
-    /// `T`, everything is bit for bit.
     #[test]
     fn stored_rounds_once_and_widens_exactly() {
         let x: Vec<C> = (0..37)
@@ -373,8 +361,6 @@ mod tests {
         assert_eq!((fb.len(), sb.len()), (37 * 16, 37 * 8));
     }
 
-    /// Rounded to the twin later, a store holds what one written single holds, its
-    /// capacity kept; one single already stays as it is.
     #[test]
     fn stored_rounds_to_single_in_place() {
         let x: Vec<C> = (0..19)
@@ -396,7 +382,6 @@ mod tests {
         assert_eq!(a, c);
     }
 
-    /// A write past the end grows the store, zero filled, within the capacity.
     #[test]
     fn stored_write_grows_zero_filled() {
         let mut s = Stored::<C>::with_capacity(8, true);
@@ -407,11 +392,11 @@ mod tests {
         assert_eq!(s.at(5), C::new(1.0, 2.0));
     }
 
-    /// The precision rule: single from sixteen units of the twin's roundoff on.
     #[test]
     fn single_from_sixteen_roundoffs_on() {
-        let edge = SINGLE_MARGIN * f32::EPSILON as f64 / 2.0;
-        assert!(single_for::<C>(edge) && single_for::<C>(1e-6));
-        assert!(!single_for::<C>(edge * 0.99) && !single_for::<f64>(1e-8));
+        let edge = SINGLE_MARGIN * U32;
+        assert!(single_for::<C>(edge) && single_for::<C>(edge * 2.0));
+        assert!(single_for::<f64>(edge) && single_for::<f32>(edge));
+        assert!(!single_for::<C>(edge * 0.99) && !single_for::<f64>(edge * 0.5));
     }
 }

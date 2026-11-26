@@ -13,10 +13,6 @@ use crate::numeric::supernodal::LlSchedule;
 use crate::sparse::csc::CscPattern;
 use crate::symbolic::SymbolicFactorization;
 
-/// Reusable symbolic analysis (fill-reducing ordering + assembly-tree levels)
-/// for a fixed sparsity pattern. Value-independent: build once with [`analyze`]
-/// and pass to [`factor_numeric`](crate::factor_numeric) for each set of numeric values sharing the
-/// pattern - the PARDISO phase-1 analysis.
 pub(crate) struct SupernodalAnalysis {
     pub(crate) inner: Option<SymbolicInner>,
     pub(crate) n: usize,
@@ -24,8 +20,6 @@ pub(crate) struct SupernodalAnalysis {
 }
 
 impl SupernodalAnalysis {
-    /// Heap bytes held: the symbolic factorization, the levels, the schedule,
-    /// and the input program once built.
     pub(crate) fn heap_bytes(&self) -> u64 {
         self.inner.as_ref().map_or(0, |i| {
             i.sym.heap_bytes()
@@ -44,23 +38,12 @@ impl SupernodalAnalysis {
 
 pub(crate) struct SymbolicInner {
     pub(crate) sym: SymbolicFactorization,
-    /// Assembly-tree levels: `by_level[l]` are the supernodes at level `l`, all
-    /// mutually independent (factored concurrently by the rayon driver).
     pub(crate) by_level: Vec<Vec<usize>>,
-    /// Lazily built input program of the LDL^T path (`P^T A P`, lower fold):
-    /// the permuted structure is fixed per pattern, so every (re)factorization
-    /// reads the values where they are. See
-    /// [`crate::numeric::supernodal::InputProgram`].
     pub(crate) input: std::sync::OnceLock<crate::numeric::supernodal::InputProgram>,
-    /// The left-looking schedule (row structures + updater lists),
-    /// pattern-only and shared by the numeric drivers and the estimators.
-    /// Built with the analysis: it is the last reader of the symbolic
-    /// factorization's pattern, which the analysis then drops.
     pub(crate) ll_schedule: LlSchedule,
 }
 
 impl SymbolicInner {
-    /// The left-looking schedule.
     pub(crate) fn schedule(&self) -> &LlSchedule {
         &self.ll_schedule
     }
@@ -72,16 +55,10 @@ impl SupernodalAnalysis {
         self.n
     }
 
-    /// Internal accessor for the unsymmetric LU driver: the symbolic
-    /// factorization and the precomputed assembly-tree levels. `None` for the
-    /// empty (`n == 0`) analysis.
     pub(crate) fn sym_and_levels(&self) -> Option<(&SymbolicFactorization, &[Vec<usize>])> {
         self.inner.as_ref().map(|i| (&i.sym, i.by_level.as_slice()))
     }
 
-    /// The pattern-only left-looking schedule (row structures + updater
-    /// lists), shared by the numeric drivers and the a-priori estimators.
-    /// `None` for the empty analysis.
     pub(crate) fn ll_schedule(&self) -> Option<&LlSchedule> {
         self.inner.as_ref().map(SymbolicInner::schedule)
     }
@@ -109,16 +86,12 @@ impl SupernodalAnalysis {
             .unwrap_or(0)
     }
 
-    /// The counts of this analysis of `nnz` stored entries as measures at the
-    /// current scope, and its decisions as a DEBUG event there: a caller
-    /// that analyzes many small systems gets one per analysis.
     pub(crate) fn probe(&self, nnz: usize, requested: crate::symbolic::OrderingMethod) {
         rsprobe::add!("nonzeros", nnz);
         rsprobe::add!("supernodes", self.n_supernodes());
         rsprobe::debug!("{}", self.describe(nnz, requested));
     }
 
-    /// The analysis in one line: size, ordering and supernodes.
     fn describe(&self, nnz: usize, requested: crate::symbolic::OrderingMethod) -> String {
         let d = self.decisions(requested);
         let asked = match d.ordering_used == d.ordering_requested {
@@ -172,28 +145,14 @@ impl SupernodalAnalysis {
     }
 }
 
-/// Analyze a full symmetric sparsity pattern
-/// ([`full_pattern`](crate::symbolic::full_pattern)) of an input with `nnz`
-/// entries: value-independent, reused by every factorization of the pattern.
-/// `amd`, where given, is the ordering race's minimum-degree candidate.
 pub(crate) fn analyze_with(
     pattern: CscPattern<i32>,
     nnz: usize,
     opts: &SolverSettings,
     amd: Option<&[usize]>,
 ) -> Result<SupernodalAnalysis, RslabError> {
-    // The symbolic build (ordering, elimination tree, supernode amalgamation,
-    // postorder) can recurse to O(n) on pathological patterns - dense/random
-    // graphs where nested dissection finds no good separators - and would overflow
-    // the caller's stack. Run it in a scoped pool whose workers have a stack sized
-    // to the problem (committed on demand), the same robustness mechanism the
-    // factorization uses. Shallow analyses get the floor stack at negligible cost.
-    //
-    // The pool is sized to the settings' thread budget (the same
-    // solver-in-the-loop contract the factorization honours), so every parallel
-    // step inside the analysis - notably the ND seed ensemble - respects the
-    // configured worker count instead of grabbing all cores.
     let n = pattern.n;
+    // https://github.com/milanofthe/rslab/issues/289
     opts.threads.run(
         stack_for_depth(n),
         |cap| cap,
@@ -217,21 +176,17 @@ fn analyze_with_inner(
     }
     let mut sym =
         crate::symbolic::analyze_pattern_from(pattern, &opts.ordering, &opts.amalgamation, amd)?;
-    // The schedule reads the pattern for the last time: past it the pattern
-    // (an index per entry of `A + A^T`, the largest part of the analysis) is
-    // dead weight every factorization of the pattern would carry.
     let ll_schedule = {
         let _s = rsprobe::scope!(DEBUG, "schedule");
         LlSchedule::build(&sym)
     };
+    // https://github.com/milanofthe/rslab/issues/289
     sym.pattern = CscPattern {
         n,
         col_ptr: Vec::new(),
         row_idx: Vec::new(),
     };
 
-    // Assembly-tree levels: level(s) = 1 + max(level(children)); same-level
-    // supernodes are mutually independent.
     let nsuper = sym.supernodes.len();
     let mut level = vec![0usize; nsuper];
     let mut max_level = 0usize;
@@ -260,10 +215,6 @@ fn analyze_with_inner(
     })
 }
 
-/// Realize a [`Threads::Auto`] policy from a symbolic analysis: compute the three
-/// predictive features (factor-flops, max front height, max tree width) and apply
-/// the [`recommend_threads_from`] policy,
-/// capped at `max_cores`. Value-independent, so it is the same for every scalar.
 pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: usize) -> usize {
     let fd = symb.front_dims();
     let flops: u64 = fd
@@ -275,9 +226,6 @@ pub(crate) fn recommend_threads_for_sym(symb: &SupernodalAnalysis, max_cores: us
     recommend_threads_from(flops, front_nrow_max, tree_width_max, max_cores)
 }
 
-/// The worker count of [`Threads::Auto`](crate::Threads::Auto), at most
-/// `cap`: the calibrated cost model where the one-time install diagnosis has
-/// run (feature `tuning`), else the structural predictor.
 pub(crate) fn auto_threads(
     symb: &SupernodalAnalysis,
     estimate: &crate::diagnostics::MemoryEstimate,
@@ -291,9 +239,6 @@ pub(crate) fn auto_threads(
     recommend_threads_for_sym(symb, cap)
 }
 
-/// The data-driven single-solve thread-count policy, as a free function over the
-/// three predictive features, so the factor path can apply it straight from the
-/// symbolic analysis. Returns a worker count in `1..=max_cores`.
 fn recommend_threads_from(
     factor_flops: u64,
     front_nrow_max: usize,
@@ -301,13 +246,13 @@ fn recommend_threads_from(
     max_cores: usize,
 ) -> usize {
     let cores = max_cores.max(1);
-    // Thin fronts + narrow tree: no node-parallelism (tiny fronts) and no
-    // tree-parallelism (path-like) to exploit - oversubscription only hurts.
-    if front_nrow_max < THIN_FRONT_MAX_ROWS && tree_width_max < NARROW_TREE_MAX_WIDTH {
+    let thin_fronts = front_nrow_max < THIN_FRONT_MAX_ROWS;
+    let narrow_tree = tree_width_max < NARROW_TREE_MAX_WIDTH;
+    if thin_fronts && narrow_tree {
         return cores.min(THIN_PATTERN_THREADS);
     }
-    // Tiny total work: parallel scheduling overhead dominates the factorization.
-    if factor_flops < SMALL_WORK_MAX_FLOPS {
+    let small_work = factor_flops < SMALL_WORK_MAX_FLOPS;
+    if small_work {
         return cores.min(SMALL_WORK_THREADS);
     }
     cores

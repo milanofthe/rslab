@@ -13,20 +13,14 @@ use crate::constants::{GEMM_SLAB, IDX32_BYTES, NODES_PER_WORKER, SCRATCH_KEEP};
 use crate::symbolic::SymbolicFactorization;
 use std::fmt;
 
-/// Heap bytes of a vector's allocation (its capacity, not its length).
 pub(crate) fn vec_bytes<T>(v: &Vec<T>) -> u64 {
     (v.capacity() * std::mem::size_of::<T>()) as u64
 }
 
-/// Heap bytes of a vector of vectors: the outer allocation and every inner one.
 pub(crate) fn nested_bytes<T>(v: &Vec<Vec<T>>) -> u64 {
     vec_bytes(v) + v.iter().map(vec_bytes).sum::<u64>()
 }
 
-/// Heap bytes of a scratch object: what a [`ScratchPool`] weighs before it
-/// keeps one.
-///
-/// [`ScratchPool`]: crate::numeric::supernodal::ScratchPool
 pub(crate) trait HeapBytes {
     fn heap_bytes(&self) -> u64;
 }
@@ -43,10 +37,6 @@ impl<A: HeapBytes, B: HeapBytes, C: HeapBytes> HeapBytes for (A, B, C) {
     }
 }
 
-/// The capacity of a `Vec` of capacity `cap` after it is resized or
-/// reserved to hold `need` entries: unchanged if it fits, else the larger of
-/// `need` and twice the old capacity (the standard library's amortized
-/// growth).
 pub(crate) fn grown(cap: usize, need: usize) -> usize {
     if need <= cap {
         cap
@@ -55,13 +45,19 @@ pub(crate) fn grown(cap: usize, need: usize) -> usize {
     }
 }
 
-/// The capacity of a `Vec` filled by `len` single pushes from empty (or
-/// from one element): powers of two from 4 on.
 pub(crate) fn pushed(len: usize) -> usize {
     if len == 0 {
         0
     } else {
         len.next_power_of_two().max(crate::constants::VEC_MIN_CAP)
+    }
+}
+
+// https://github.com/milanofthe/rslab/issues/288
+#[inline]
+pub(crate) fn grow<T: crate::Scalar>(v: &mut Vec<T>, len: usize) {
+    if v.len() < len {
+        v.resize(len, T::zero());
     }
 }
 
@@ -141,16 +137,6 @@ impl fmt::Display for MemoryPlan {
     }
 }
 
-/// Heap the `workers` of a supernodal factorization hold whatever nodes they
-/// run, and what they keep after it: per node in flight `maps`
-/// global-to-local maps of `n` entries (a node stolen by a waiting worker
-/// takes fresh ones), per worker the GEMM crate's packing slab, and the
-/// buffers of split real planes. A buffer grows to at most twice the largest
-/// product run on it, and the nodes in flight on different workers are
-/// different nodes, so the buffers are bounded by the largest needs of
-/// `planes` (one `(entries, workers running them)` per node) over the nodes
-/// in flight. Afterwards each worker keeps one set of maps and its planes up
-/// to [`SCRATCH_KEEP`]. Returns `(during, kept)`.
 pub(crate) fn worker_bytes<T: crate::Scalar>(
     n: usize,
     maps: usize,
@@ -175,28 +161,15 @@ pub(crate) fn worker_bytes<T: crate::Scalar>(
     (during as u64, kept)
 }
 
-/// Heap `pools` scratch pools of a factorization on `workers` hold on top of
-/// what their running nodes need: each object, in its pool or lent to a
-/// node, carries at most [`SCRATCH_KEEP`] from earlier nodes, and no more
-/// than the `largest` scratch of any node, and a pool has no more objects
-/// than nodes can be in flight.
 pub(crate) fn pooled_bytes(pools: usize, workers: usize, largest: u64) -> u64 {
     (pools * NODES_PER_WORKER * workers.max(1)) as u64 * largest.min(SCRATCH_KEEP)
 }
 
-/// The heaviest set of at most `workers` x [`NODES_PER_WORKER`] supernodes
-/// no two of which are ancestor and descendant, by `weight`: a bound on the
-/// node scratch live at once, since a node starts only after its whole
-/// subtree has finished. Supernodes are in postorder (children before their
-/// parent).
 pub(crate) fn concurrent_peak(
     sym: &SymbolicFactorization,
     workers: usize,
     weight: impl Fn(usize) -> u64,
 ) -> u64 {
-    // `best[s][k]`: the heaviest such set of at most `k` nodes in the subtree
-    // of `s`, kept only until the parent has merged it; the lengths are capped
-    // by the leaf count, which bounds the merges at O(nodes x workers).
     let cap = NODES_PER_WORKER * workers.max(1) + 1;
     let merge = |a: &[u64], b: &[u64]| -> Vec<u64> {
         let len = (a.len() + b.len() - 1).min(cap);

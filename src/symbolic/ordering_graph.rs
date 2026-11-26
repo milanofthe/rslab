@@ -18,13 +18,9 @@ use rslab_ordering_core::{Counter, Progress};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
-/// What a minimum-degree ordering costs per entry of the graph it orders:
-/// the candidates of the race decide on it whether they run side by side.
 pub(super) static ORDER_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::ORDER_NS_PER_ENTRY);
 
-/// The least count of a unit of `ns_per_unit` ns from which work goes wide
-/// at `least` ns ([`crate::parallel::Dispatch::least`]).
 fn units(least: f64, ns_per_unit: f32) -> usize {
     let n = (least / ns_per_unit as f64).ceil();
     if n.is_finite() && n < usize::MAX as f64 {
@@ -38,21 +34,13 @@ pub(super) struct OrderingGraph<'a> {
     /// The full symmetric pattern (both triangles, sorted rows), the graph
     /// the ordering crates order where it is not compressed.
     pub pattern: &'a CscPattern<i32>,
-    /// The options of the orderings and the compression.
     settings: &'a OrderingSettings,
-    /// The compressed graph where the groups shrink the pattern enough,
-    /// built on first use (a given permutation needs none). Build it with
-    /// [`prepare`](Self::prepare) before orderings run concurrently: a
-    /// worker waiting inside the build could otherwise steal a task that
-    /// waits on the same build.
     compressed: OnceLock<Option<Compressed>>,
 }
 
 struct Compressed {
     groups: Supervariables,
-    /// Group sizes, the vertex weights of the compressed graph.
     weights: Vec<i32>,
-    /// One vertex per group.
     graph: CscPattern<i32>,
 }
 
@@ -65,6 +53,7 @@ impl<'a> OrderingGraph<'a> {
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/291
     /// Build the compressed graph now.
     pub fn prepare(&self) {
         self.compressed();
@@ -140,8 +129,6 @@ impl<'a> OrderingGraph<'a> {
                             .or_else(|| self.settings.nd.progress.clone()),
                         ..self.settings.nd.clone()
                     };
-                    // Where unset, its sections go wide from where they are
-                    // worth it on the rayon pool it runs on.
                     let d = crate::parallel::rayon_dispatch();
                     let blocks = crate::constants::FINE_PIECES_PER_WORKER * d.threads();
                     opts.parallel_min_vertices.get_or_insert_with(|| {
@@ -165,7 +152,6 @@ impl<'a> OrderingGraph<'a> {
         }
         .map_err(|e| RslabError::InvalidInput(format!("ordering failed: {e}")))?;
         let order = checked(&order, g.n)?;
-        // Every vertex ordered, also where the ordering does not report.
         if let Some(p) = progress {
             p.report(g.n, g.n);
         }
@@ -178,19 +164,12 @@ impl<'a> OrderingGraph<'a> {
     }
 }
 
-/// An ordering of the pattern's vertices (new-to-old) with the elimination
-/// tree and the column counts of the ordered pattern.
 pub(super) struct Structure {
     pub perm: Vec<usize>,
     pub etree: EliminationTree,
     pub col_counts: Vec<usize>,
 }
 
-/// The structure under the ordering `perm` of the full `pattern`, read
-/// through the permutation: column `new` is the original column
-/// `perm[new]` with its rows mapped by the inverse, so the permuted pattern
-/// is never built or sorted. `progress` hears of the columns read, once by
-/// the tree and once by the counts.
 pub(super) fn structure(
     pattern: &CscPattern<i32>,
     perm: Vec<usize>,
@@ -215,11 +194,6 @@ pub(super) fn structure(
     }
 }
 
-/// The structure under the group ordering `order` of the compressed graph,
-/// expanded to the vertices. The members of a group are eliminated
-/// consecutively and share their structure, so they form a chain in the
-/// tree whose last member hangs below the first member of the parent group,
-/// and member `t` of a group with weighted count `c` has `c - t` entries.
 fn grouped_structure(c: &Compressed, order: &[usize], progress: Option<&Progress>) -> Structure {
     let (groups, ng) = (&c.groups, order.len());
     let mut inv = vec![0usize; ng];
@@ -263,8 +237,6 @@ fn grouped_structure(c: &Compressed, order: &[usize], progress: Option<&Progress
     }
 }
 
-/// An ordering from an ordering crate, checked to be a permutation of
-/// `0..n`.
 fn checked(order: &[i32], n: usize) -> Result<Vec<usize>, RslabError> {
     let mut seen = vec![false; n];
     let perm: Option<Vec<usize>> = order

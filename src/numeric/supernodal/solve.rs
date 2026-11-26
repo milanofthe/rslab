@@ -31,9 +31,6 @@
 //! in the same order for every thread count, so the solution is
 //! bit-identical from one thread to many.
 
-// The kernels index several parallel arrays (panels, row lists, slots,
-// right-hand sides) at offset positions; index loops read closer to the
-// linear algebra than zipped iterators would.
 #![allow(clippy::needless_range_loop)]
 
 use crate::constants::{
@@ -41,6 +38,7 @@ use crate::constants::{
     SOLVE_RHS_TILE, TILE_ROWS, VEC_HEADER_BYTES, WORD_BYTES,
 };
 use crate::error::RslabError;
+use crate::memory::grow;
 use crate::numeric::ldlt::LdltPivots;
 use crate::numeric::settings::Threads;
 use crate::numeric::supernodal::panel::{Layout, PanelFactor, PanelStorage};
@@ -48,105 +46,51 @@ use crate::scalar::Scalar;
 
 const NONE: u32 = u32::MAX;
 
-/// The flag of an accumulator slot ([`SolvePlan::ext_slot`]) whose term is the
-/// first one written into it in the forward sweep: the term is stored, not
-/// added, so no accumulator is zeroed.
-const FIRST: u32 = !(u32::MAX >> 1);
+const FIRST_WRITE: u32 = !(u32::MAX >> 1);
 
 mod dag;
 mod sparse;
 pub use sparse::SparseReach;
 
-/// One leaf subtree of the cut: its supernodes in elimination order and the
-/// rows outside it its updates accumulate into.
 #[derive(Clone)]
 pub(crate) struct Subtree {
     nodes: Vec<u32>,
-    /// The accumulator's slots: the rows outside the subtree its nodes' off-block
-    /// rows reach, ascending (they lie in the ancestors above the cut). An
-    /// accumulator of the ancestor columns alone would hold every column of
-    /// the subtree's ancestor path, most of them never written (a 79 k
-    /// near-field LU: 128 MB a right-hand side over all accumulators).
+    // https://github.com/milanofthe/rslab/issues/289
     ext: Vec<u32>,
 }
 
-/// The factor in solve layout plus the tree schedule.
 #[derive(Clone)]
 pub(crate) struct SolvePlan<T> {
     n: usize,
-    /// Supernode column ranges, `ns + 1`.
     sn_col: Vec<u32>,
-    /// Off-block row ranges into `rows` / `ext_slot`, `ns + 1`.
     row_ptr: Vec<usize>,
-    /// Off-block row indices per supernode, ascending.
     rows: Vec<u32>,
-    /// Per off-block row: accumulator slot when the row lies outside the
-    /// supernode's leaf subtree, `NONE` when it is written directly; with
-    /// [`FIRST`] set where its node is the first in the forward sweep to write
-    /// the slot (every slot of an ancestor's own accumulator, and in a leaf
-    /// subtree the first of its nodes in order that reaches the row).
     ext_slot: Vec<u32>,
-    /// The panels in the factor's own storage ([`PanelFactor`], each in its
-    /// [`Layout`]): supernode `s` is `vals[val_rng[s].0..val_rng[s].1]`.
     val_rng: Vec<(usize, usize)>,
     vals: Vec<T>,
-    /// A row list of the factor's size, the buffer the next refactorization
-    /// emits its rows into (see [`take_storage`](Self::take_storage)).
     spare_rows: Vec<u32>,
-    /// Reciprocal diagonal per column for a non-unit triangular factor (the
-    /// `U^T` of an LU); empty for a unit-diagonal factor.
     diag_inv: Vec<T>,
     subtrees: Vec<Subtree>,
-    /// The ancestors (supernodes above the cut) by depth from the roots;
-    /// siblings of a level are independent.
     pub(crate) top_levels: Vec<Vec<u32>>,
-    /// Position of a supernode in `top` (`NONE` below the cut).
     top_index: Vec<u32>,
-    /// Per ancestor level, the start of each node's accumulator (its own
-    /// off-block rows) in the level's block, in slots (`level.len() + 1`).
     top_acc_ptr: Vec<Vec<usize>>,
-    /// The ancestors by `top_index` (ascending), a parent after its
-    /// children: the nodes of the parallel sweeps' task DAG ([`dag`]).
     top: Vec<u32>,
-    /// The roots among the ancestors, by `top_index`.
     top_roots: Vec<u32>,
-    /// Each ancestor's parent, by `top_index` (`NONE` for a root).
     top_parent: Vec<u32>,
-    /// Each ancestor's children above the cut, by `top_index` (CSR over
-    /// `top_kids`, `top.len() + 1`).
     top_kids_ptr: Vec<usize>,
     top_kids: Vec<u32>,
-    /// Where each ancestor's accumulator starts in the one block of all of
-    /// them, in slots (`top.len() + 1`).
     top_acc_off: Vec<usize>,
-    /// What each ancestor takes into its columns before its sweep (CSR over
-    /// `pull`, `top.len() + 1`): `(source, lo, hi)`, the slots `lo..hi` of a
-    /// leaf subtree's accumulator (`source < subtrees.len()`, the rows its
-    /// `ext` lists there) or of an ancestor's (`source - subtrees.len()` its
-    /// `top_index`, the rows of its own off-block list there), the ones that
-    /// lie in this ancestor's columns. In the order the level sweeps reduce
-    /// them: the subtrees in order, then the ancestors from the deepest level
-    /// up, a level in node order.
     pull_ptr: Vec<usize>,
     pull: Vec<(u32, u32, u32)>,
-    /// The structure is no elimination tree (see `from_panels`): the level
-    /// sweeps alone, one node after another.
     chain: bool,
-    /// The panel entries of the leaf subtrees, the work their sweeps share.
     subtree_work: usize,
-    /// The blocking of the sweeps.
     cfg: crate::SolveSettings,
 }
 
-/// Per-task scratch vectors, reused across nodes: the big nodes need
-/// buffers of tens to hundreds of kilobytes, and allocating those per node
-/// (page faults under the allocator lock) serialises the parallel phases.
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) struct Scratch<T> {
-    /// A node's product of its rows below the diagonal block (forward).
     t: Vec<T>,
-    /// The final values of a node's rows below it, gathered (backward).
     g: Vec<T>,
-    /// A leaf subtree's accumulator of its off-tree updates.
     acc: Vec<T>,
 }
 
@@ -160,22 +104,12 @@ impl<T> Default for Scratch<T> {
     }
 }
 
-/// The sweeps' scratch across solves (part of [`crate::SolveWork`]): a
-/// [`Scratch`] per leaf subtree and per node of the widest node-parallel
-/// ancestor level, the apex nodes' scratch, and an ancestor level's
-/// accumulator block. Sized by the first solve through a plan, reused
-/// after, so a warm sweep allocates nothing.
 pub(crate) struct PlanWork<T> {
     subtrees: Vec<Scratch<T>>,
     level: Vec<Scratch<T>>,
     apex: Scratch<T>,
-    /// The ancestors' accumulators (forward) and gathered rows below
-    /// (backward), each ancestor's at `top_acc_off`; a level's (the level
-    /// sweeps).
     top_acc: Vec<T>,
-    /// The open inputs of the ancestors' task DAG ([`dag`]).
     dag: dag::DagWork,
-    /// This sweep's decision: on the pool, or on the calling thread.
     parallel: bool,
 }
 
@@ -193,13 +127,10 @@ impl<T> Default for PlanWork<T> {
 }
 
 impl<T> PlanWork<T> {
-    /// Whether the sweep this work is fitted for runs on the pool.
     pub(crate) fn on_pool(&self) -> bool {
         self.parallel
     }
 
-    /// At least a scratch per subtree and per node of the widest level of
-    /// `plan`; never shrinks, so one work serves several plans.
     fn fit(&mut self, subtrees: usize, widest: usize) {
         if self.subtrees.len() < subtrees {
             self.subtrees.resize_with(subtrees, Scratch::default);
@@ -210,18 +141,14 @@ impl<T> PlanWork<T> {
     }
 }
 
-/// Shared mutable view of a right-hand side for the subtree phases.
-///
-/// SAFETY contract: concurrent users write disjoint index sets (a subtree
-/// writes only its own columns) and read only indices no other task writes
-/// during the phase (its own columns, or ancestor columns that are final).
 #[derive(Clone, Copy)]
 struct Shared<T>(*mut T, usize);
+// SAFETY: concurrent users write disjoint index sets (a subtree writes only
+// its own columns) and read only indices no other task writes during the
+// phase (its own columns, or ancestor columns that are final).
 unsafe impl<T: Send> Send for Shared<T> {}
 unsafe impl<T: Sync> Sync for Shared<T> {}
 impl<T> Shared<T> {
-    /// The pointer, for a task that takes a part of it (the whole `Shared`
-    /// captured, not its field).
     #[inline]
     fn ptr(&self) -> *mut T {
         self.0
@@ -234,11 +161,6 @@ impl<T> Shared<T> {
     }
 }
 
-/// The cut of the tree ([`SolvePlan::from_panels`]): split the heaviest
-/// subtree until every leaf subtree holds at most `1 / leaf_subtrees` of the
-/// work (or is a single supernode). `own(s)` is the work of supernode `s`,
-/// its panel entries. Returns which supernodes lie above the cut and the
-/// leaf subtree roots, ascending.
 fn cut(
     parent: &[u32],
     children: &[Vec<u32>],
@@ -275,8 +197,6 @@ fn cut(
     (is_top, leaf_roots)
 }
 
-/// The heap of a [`SolvePlan`] not built yet, for the memory plan: the
-/// schedule around the panels, its build and a solve's work vectors.
 pub(crate) struct LayoutSize {
     /// Bytes of the schedule (all but the values and the reciprocal diagonal).
     pub held: u64,
@@ -288,12 +208,6 @@ pub(crate) struct LayoutSize {
     pub solve_per_rhs: u64,
 }
 
-/// The [`LayoutSize`] of the plan [`SolvePlan::from_panels`] builds on the
-/// supernode tree (`parent`, `usize::MAX` for a root) with each supernode's
-/// width `w` and off-block rows `off_rows(s)` (ascending), solved on `threads`
-/// threads. Mirrors `from_panels` on a tree-nested structure; where a
-/// factorization keeps fewer rows than its structure has (cancellation), an
-/// upper bound.
 pub(crate) fn layout_size<'r>(
     parent: &[usize],
     w: &[usize],
@@ -327,8 +241,6 @@ pub(crate) fn layout_size<'r>(
         sn_of[c..c + w[s]].fill(s as u32);
         c += w[s];
     }
-    // per leaf subtree its nodes, and its rows outside it (`ext`) and their
-    // runs by ancestor (its pulls)
     let mut subtree_of = vec![NONE; ns];
     let (mut ext, mut ext_runs, mut sizes) = (Vec::new(), Vec::new(), Vec::new());
     let mut list: Vec<u32> = Vec::new();
@@ -369,39 +281,36 @@ pub(crate) fn layout_size<'r>(
         level_len[depth[s]] += 1;
     }
     let top: Vec<usize> = (0..ns).filter(|&s| is_top[s]).collect();
-    // sn_col, row_ptr, val_rng (a pair per supernode), rows, ext_slot, top_index.
     let (idx, word, vec) = (IDX32_BYTES, WORD_BYTES, VEC_HEADER_BYTES);
-    let fixed = idx * (ns + 1) + word * (ns + 1) + 2 * word * ns + word * rows + idx * ns;
+    let sn_col_bytes = idx * (ns + 1);
+    let row_ptr_bytes = word * (ns + 1);
+    let val_rng_bytes = 2 * word * ns;
+    let rows_and_ext_slot_bytes = word * rows;
+    let top_index_bytes = idx * ns;
+    let fixed =
+        sn_col_bytes + row_ptr_bytes + val_rng_bytes + rows_and_ext_slot_bytes + top_index_bytes;
     let subtrees = leaf_roots.len() * std::mem::size_of::<Subtree>()
         + (0..leaf_roots.len())
             .map(|t| idx * pushed(sizes[t]) + idx * ext[t])
             .sum::<usize>();
-    // the levels' nodes and their accumulators' starts (`top_acc_ptr`, `l + 1` each)
     let levels = 2 * level_len.len() * vec
         + (level_len.iter())
             .map(|&l| idx * pushed(l) + word * pushed(l + 1))
             .sum::<usize>();
-    // The task schedule: the ancestors, their roots, parents and children,
-    // the accumulator offsets and the pulls (a run of a source's rows per
-    // ancestor they lie in: every leaf subtree's and every ancestor's).
     let roots = top.iter().filter(|&&t| parent[t] == NONE).count();
     let pulls = ext_runs.iter().sum::<usize>()
         + top
             .iter()
             .map(|&t| runs(off_rows(t), &sn_of))
             .sum::<usize>();
-    let offsets = word * (top.len() + 1); // the children's, the accumulators', the pulls'
+    let top_ptr_bytes = word * (top.len() + 1);
+    let (top_kids_ptr, top_acc_off, pull_ptr) = (top_ptr_bytes, top_ptr_bytes, top_ptr_bytes);
     let schedule = idx * (top.len() + roots + top.len() + top.len() - roots)
-        + offsets
-        + offsets
-        + offsets
+        + top_kids_ptr
+        + top_acc_off
+        + pull_ptr
         + std::mem::size_of::<(u32, u32, u32)>() * pulls;
-    // sn_of, the tree (parent, children), work, heap, flags and slots.
     let build = idx * n + ns * SOLVE_BUILD_NODE_BYTES;
-    // Accumulators of the subtrees (their `ext`) and of every ancestor (its
-    // own off-block rows; the task DAG keeps them all to its end and gathers
-    // the rows below into them backward), and per thread a subtree sweep's
-    // node product and gathered rows.
     let max_ld = (0..ns).map(|s| w[s] + m[s]).max().unwrap_or(0);
     let solve_per_rhs = ext.iter().sum::<usize>()
         + top.iter().map(|&t| m[t]).sum::<usize>()
@@ -413,7 +322,6 @@ pub(crate) fn layout_size<'r>(
     }
 }
 
-/// The runs of an ascending row list by the supernode its rows lie in.
 fn runs(list: &[u32], sn_of: &[u32]) -> usize {
     let mut k = 0;
     let mut last = NONE;
@@ -428,9 +336,6 @@ fn runs(list: &[u32], sn_of: &[u32]) -> usize {
 }
 
 impl<T: Scalar> SolvePlan<T> {
-    /// Heap bytes held: the panels (the factor's values) and the schedule.
-    /// The reciprocals of the diagonal of a non-unit factor (empty for a
-    /// unit one), in elimination order.
     pub(crate) fn diag_inv(&self) -> &[T] {
         &self.diag_inv
     }
@@ -544,7 +449,6 @@ impl<T: Scalar> SolvePlan<T> {
             w * (w + (row_ptr[s + 1] - row_ptr[s]) as u64)
         });
 
-        // Subtree membership and node lists (ascending = elimination order).
         let mut subtree_of = vec![NONE; ns];
         let mut subtrees: Vec<Subtree> = Vec::with_capacity(leaf_roots.len());
         for (t, &r) in leaf_roots.iter().enumerate() {
@@ -582,12 +486,10 @@ impl<T: Scalar> SolvePlan<T> {
             st.ext = ext;
         }
         let top: Vec<u32> = (0..ns as u32).filter(|&s| is_top[s as usize]).collect();
-        // Ancestors by depth from the roots (level 0 = roots); an ancestor's
-        // accumulator is its own off-block rows.
         let mut depth = vec![0u32; ns];
         for &t in top.iter().rev() {
-            // Parents carry larger indices: descending order sets them first.
             let p = parent[t as usize];
+            debug_assert!(p == NONE || p > t);
             depth[t as usize] = if p == NONE { 0 } else { depth[p as usize] + 1 };
         }
         let max_depth = top.iter().map(|&t| depth[t as usize]).max().unwrap_or(0) as usize;
@@ -597,13 +499,6 @@ impl<T: Scalar> SolvePlan<T> {
             top_levels[depth[t as usize] as usize].push(t);
         }
 
-        // Accumulator slots of the off-tree rows: a subtree's row its position
-        // in the subtree's `ext`, an ancestor's off-block row its position in
-        // the ancestor's own rows. A row whose supernode is not an ancestor of
-        // the writer (the structure no longer follows an elimination tree)
-        // makes the structure degenerate; such a factor is solved without the
-        // subtree phase (everything above the cut, sequential in the tree
-        // phases).
         let mut ext_slot = vec![NONE; rows.len()];
         let mut on_path = vec![false; ns];
         let mut degenerate = false;
@@ -626,10 +521,10 @@ impl<T: Scalar> SolvePlan<T> {
                     let a = sn_of[r as usize];
                     if subtree_of[a as usize] != subtree_of[s as usize] {
                         if on_path[a as usize] {
-                            // `ext` holds every such row
                             let slot = st.ext.partition_point(|&x| x < r);
+                            debug_assert_eq!(st.ext.get(slot), Some(&r));
                             let first = !std::mem::replace(&mut written[slot], true);
-                            ext_slot[e] = slot as u32 | if first { FIRST } else { 0 };
+                            ext_slot[e] = slot as u32 | if first { FIRST_WRITE } else { 0 };
                         } else {
                             degenerate = true;
                         }
@@ -643,7 +538,7 @@ impl<T: Scalar> SolvePlan<T> {
             let r0 = row_ptr[t as usize];
             for e in r0..row_ptr[t as usize + 1] {
                 if on_path[sn_of[rows[e] as usize] as usize] {
-                    ext_slot[e] = (e - r0) as u32 | FIRST;
+                    ext_slot[e] = (e - r0) as u32 | FIRST_WRITE;
                 } else {
                     degenerate = true;
                 }
@@ -652,10 +547,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
         let chain = degenerate;
         let (subtrees, top, top_levels, ext_slot) = if degenerate {
-            // The structure does not follow an elimination tree (an LU whose
-            // row pivoting moved rows across subtrees): one sequential chain, every node an ancestor
-            // without slots. Levels run from the root, so the deepest level
-            // (processed first by the forward sweep) is the first column.
             rsprobe::debug!("solve layout: structure not tree-nested, sequential sweeps");
             let all: Vec<u32> = (0..ns as u32).collect();
             let levels: Vec<Vec<u32>> = all.iter().rev().map(|&s| vec![s]).collect();
@@ -670,8 +561,6 @@ impl<T: Scalar> SolvePlan<T> {
             }
             ix
         };
-        // Per ancestor level, where each node's accumulator starts in the
-        // level's block, in slots.
         let top_acc_ptr: Vec<Vec<usize>> = top_levels
             .iter()
             .map(|level| {
@@ -683,7 +572,6 @@ impl<T: Scalar> SolvePlan<T> {
                     .collect()
             })
             .collect();
-        // The task schedule of the ancestors.
         let top_parent: Vec<u32> = top
             .iter()
             .map(|&t| match parent[t as usize] {
@@ -716,12 +604,10 @@ impl<T: Scalar> SolvePlan<T> {
         for (i, &t) in top.iter().enumerate() {
             top_acc_off[i + 1] = top_acc_off[i] + row_ptr[t as usize + 1] - row_ptr[t as usize];
         }
-        // The pulls, in the level sweeps' order of reduction: per source the
-        // runs of its accumulator rows by the ancestor they lie in (`ext` and
-        // an ancestor's rows are ascending, an ancestor's columns contiguous).
         let mut pulls: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); top.len()];
         if !chain {
             let runs = |src: u32, list: &[u32], pulls: &mut Vec<Vec<(u32, u32, u32)>>| {
+                debug_assert!(list.windows(2).all(|r| r[0] < r[1]));
                 let mut lo = 0;
                 while lo < list.len() {
                     let a = sn_of[list[lo] as usize];
@@ -750,7 +636,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
         let mut pull: Vec<(u32, u32, u32)> = Vec::with_capacity(pull_ptr[top.len()]);
         pull.extend(pulls.into_iter().flatten());
-        // The work of the subtrees' sweeps.
         let entries = |s: u32| val_rng[s as usize].1 - val_rng[s as usize].0;
         let subtree_work = (subtrees.iter())
             .map(|st| st.nodes.iter().map(|&s| entries(s)).sum::<usize>())
@@ -793,9 +678,6 @@ impl<T: Scalar> SolvePlan<T> {
         plan
     }
 
-    /// The panels' buffer and a spare row list, taken out for the next
-    /// factorization of the same analysis to fill; [`refill`](Self::refill)
-    /// puts the result back. The plan cannot solve until then.
     pub(crate) fn take_storage(&mut self) -> PanelStorage<T> {
         PanelStorage {
             vals: std::mem::take(&mut self.vals),
@@ -817,7 +699,6 @@ impl<T: Scalar> SolvePlan<T> {
     ) {
         let cfg_now = cfg;
         let ns = factor.n_supernodes();
-        // (the supernodes and their rows fix the panels' layouts)
         let same = cfg_now == self.cfg
             && factor.n == self.n
             && unit == self.diag_inv.is_empty()
@@ -830,8 +711,6 @@ impl<T: Scalar> SolvePlan<T> {
             return;
         }
         rsprobe::add!("layouts kept", 1);
-        // The new row list equals the plan's: kept as the next spare, and the
-        // buffer keeps its room for the next factorization to fill again.
         if !unit {
             for s in 0..ns {
                 let (c0, lay) = (self.sn_col[s] as usize, factor.layout(s));
@@ -851,11 +730,6 @@ impl<T: Scalar> SolvePlan<T> {
         self.spare_rows = rows;
     }
 
-    /// The schedule's bounds in panel entries (a sweep's work per right-hand
-    /// side): the leaf subtrees' share and their balance, the ancestors'
-    /// share, the longest chain of ancestors to a root (the critical path of
-    /// their task tree), the widths of the top levels and the accumulator
-    /// slots the ancestors take.
     fn describe(&self) -> String {
         let entries = |s: u32| self.val_rng[s as usize].1 - self.val_rng[s as usize].0;
         let sub: Vec<usize> = (self.subtrees.iter())
@@ -865,8 +739,6 @@ impl<T: Scalar> SolvePlan<T> {
         let top_work = self.nodes_work(&self.top);
         let path = self.critical_path();
         let critical = self.nodes_work(&path.iter().map(|&t| self.top[t]).collect::<Vec<_>>());
-        // the nodes of that chain: their triangles' and their rows below's entries, and
-        // the widths of the large ones (root first)
         let (mut tri, mut off, mut wide) = (0usize, 0usize, Vec::new());
         for &t in &path {
             let (_, w, _, m, _, _) = self.node(self.top[t]);
@@ -901,15 +773,13 @@ impl<T: Scalar> SolvePlan<T> {
         )
     }
 
-    /// The longest chain of ancestors to a root in panel entries, the
-    /// critical path of their task tree: its `top` indices, root first.
     fn critical_path(&self) -> Vec<usize> {
         let entries = |s: u32| self.val_rng[s as usize].1 - self.val_rng[s as usize].0;
-        // ancestors ascend, a parent after its children
         let mut path = vec![0usize; self.top.len()];
         let mut next = vec![NONE; self.top.len()];
         for ti in 0..self.top.len() {
             let kids = &self.top_kids[self.top_kids_ptr[ti]..self.top_kids_ptr[ti + 1]];
+            debug_assert!(kids.iter().all(|&k| (k as usize) < ti));
             if let Some(&k) = kids.iter().max_by_key(|&&k| path[k as usize]) {
                 next[ti] = k;
                 path[ti] = path[k as usize];
@@ -925,15 +795,7 @@ impl<T: Scalar> SolvePlan<T> {
         chain
     }
 
-    /// The row chunks a node's product of `rows` rows and depth `depth` for `nr`
-    /// right-hand sides runs in on the pool (`par`, the node an ancestor): about
-    /// [`SolveSettings::gemm_task`](crate::SolveSettings::gemm_task) entries times
-    /// right-hand sides each, at least [`chunk_align`] rows each and cut at its
-    /// multiples ([`chunk_rows`]). One, the whole product, on the calling thread;
-    /// none for no rows. Within a call the GEMM blocks a product's depth alike
-    /// for any row count (depth up to 64 here in the forward sweep, row counts
-    /// up to 64 in the backward one), so a row's sums are the same in a chunk as
-    /// in the whole product, and a node's are the same on one thread as on many.
+    // https://github.com/milanofthe/rslab/issues/289
     fn node_chunks(&self, par: bool, rows: usize, depth: usize, nr: usize) -> usize {
         let whole = usize::from(rows > 0);
         if !par {
@@ -955,15 +817,7 @@ impl<T: Scalar> SolvePlan<T> {
         (c0, w, r0, m, w + m, panel)
     }
 
-    // -----------------------------------------------------------------------
-    // Single right-hand side
-    // -----------------------------------------------------------------------
-
-    /// Run `f` inside a pool when `par`: the factor's scoped pool of its
-    /// worker budget, or under [`Threads::Ambient`] the current one. Every
-    /// parallel section is cheap to start from a worker and expensive to
-    /// inject from outside, so a solve enters the pool once. Otherwise here,
-    /// under the budget ([`Threads::here`]).
+    // https://github.com/milanofthe/rslab/issues/289
     fn in_pool<R: Send>(par: bool, threads: Threads, f: impl FnOnce() -> R + Send) -> R {
         if !par {
             return threads.here(f);
@@ -975,9 +829,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// `f` over the items with their scratch: as wide as the pool when
-    /// `par`, in order on the calling thread otherwise; the same sums either
-    /// way.
     fn each<A: Sync, S: Send>(
         par: bool,
         items: &[A],
@@ -993,20 +844,12 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// The panel entries of the supernodes `nodes`.
     fn nodes_work(&self, nodes: &[u32]) -> usize {
         (nodes.iter())
             .map(|&s| self.val_rng[s as usize].1 - self.val_rng[s as usize].0)
             .sum()
     }
 
-    /// `work` fitted to a sweep of `nr` right-hand sides under the thread
-    /// budget `threads`: a scratch per subtree and per node of the widest
-    /// ancestor level, and the decision to run on the pool: where its panel
-    /// entries times the right-hand sides up to four reach
-    /// [`SOLVE_PAR_MIN_ENTRY_RHS`], or where they clear
-    /// [`SolveSettings::par_min_work`](crate::SolveSettings::par_min_work),
-    /// where that is set.
     fn fit<'w>(
         &self,
         work: &'w mut PlanWork<T>,
@@ -1026,11 +869,6 @@ impl<T: Scalar> SolvePlan<T> {
         work
     }
 
-    /// `sweep` of `nr` right-hand sides on `work` fitted for it, on the pool
-    /// or on the calling thread as decided. The solve's other passes over
-    /// its right-hand sides (the permuted copies) go inside `sweep`, so a
-    /// solve enters the pool once; `work.on_pool()` tells them where they
-    /// run.
     pub(crate) fn sweep<R: Send>(
         &self,
         work: &mut PlanWork<T>,
@@ -1042,24 +880,6 @@ impl<T: Scalar> SolvePlan<T> {
         Self::in_pool(work.parallel, threads, || sweep(work))
     }
 
-    // -----------------------------------------------------------------------
-    // Ancestor supernodes: a task DAG over their tiles, or the levels
-    // -----------------------------------------------------------------------
-    //
-    // The supernodes above the cut form the top of the elimination tree.
-    // On the pool they run as a task DAG over the 64-column tiles of their
-    // dense nodes ([`dag`]: `forward_dag`, `backward_dag`): a tile's products
-    // start once the tile they take is solved, a parent's tile once the
-    // chunks of its children that reach it are done, with no level waiting
-    // for its slowest node and no node waiting for its slowest section. On
-    // one thread, or on a factor whose structure is no elimination tree, the
-    // levels run in order (`top_forward`, `top_backward`), the node products
-    // as GEMMs ([`fwd_node_gemm`](Self::fwd_node_gemm),
-    // [`bwd_node_gemm`](Self::bwd_node_gemm)); the DAG runs the same products
-    // cut by rows, so every row's sums are the same.
-
-    /// Whether the ancestors run as the task DAG (`forward_dag`,
-    /// `backward_dag`) rather than level by level.
     fn flows(&self, work: &PlanWork<T>) -> bool {
         work.parallel && !self.chain && !self.top.is_empty()
     }
@@ -1070,7 +890,6 @@ impl<T: Scalar> SolvePlan<T> {
         let shared = Shared(y.as_mut_ptr(), y.len());
         for (li, level) in self.top_levels.iter().enumerate().rev() {
             let node_par = !par || level.len() >= nt || nt == 1;
-            // One accumulator block for the level, a disjoint slice per node.
             let ptr = &self.top_acc_ptr[li];
             grow(&mut work.top_acc, ptr[level.len()] * nr);
             let accs = Shared(work.top_acc.as_mut_ptr(), work.top_acc.len());
@@ -1135,16 +954,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Blocked right-hand sides (row-major `n x nrhs`)
-    // -----------------------------------------------------------------------
-
-    /// The forward sweep of node `s` for `nr` right-hand sides with its dense
-    /// products as GEMMs ([`fwd_node_core`](Self::fwd_node_core)), each row of
-    /// `L_off X` taken off `y` where the node writes it directly and into the
-    /// accumulator `acc` at its slot otherwise. A row's sums run in the
-    /// products' order, so a column of a block agrees with its single solve to
-    /// rounding, not to the bit.
     #[allow(clippy::too_many_arguments)]
     fn fwd_node_gemm(
         &self,
@@ -1169,9 +978,9 @@ impl<T: Scalar> SolvePlan<T> {
                 let r = rows[i] as usize;
                 sub_assign(&mut y[r * nr..(r + 1) * nr], ti);
             } else {
-                let a = (sl & !FIRST) as usize;
+                let a = (sl & !FIRST_WRITE) as usize;
                 let to = &mut acc[a * nr..(a + 1) * nr];
-                if sl & FIRST != 0 {
+                if sl & FIRST_WRITE != 0 {
                     to.copy_from_slice(ti);
                 } else {
                     add_assign(to, ti);
@@ -1180,16 +989,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
-    /// the reach-limited sweep of sparse right-hand sides, block by block of
-    /// the panel ([`Layout`]): each block's triangle on the
-    /// register tiles on the node's own rows `yb` (`nr` wide), then the node's
-    /// own rows below it take its columns in one product; once the triangle is
-    /// solved, `L_off X` into `t[..m * nr]` (left untouched when the node has
-    /// no off-block rows), each row the blocks' products summed in block order,
-    /// in one section of row chunks across all blocks. The products run in row
-    /// chunks on the pool when `par` ([`node_chunks`](Self::node_chunks)). The
-    /// caller takes `t` off the rows the node's off-block rows map to.
     pub(super) fn fwd_node_core(&self, s: u32, nr: usize, yb: &mut [T], par: bool, t: &mut Vec<T>) {
         let (c0, w, _, m, _, panel) = self.node(s);
         let lay = Layout::new(w, m);
@@ -1209,7 +1008,6 @@ impl<T: Scalar> SolvePlan<T> {
                     je - jb,
                 );
             }
-            // the node's own rows `je..w` take the block's columns
             let k = je - jb;
             let own = self.node_chunks(par, w - je, k, nr);
             let yp = Shared(yb.as_mut_ptr(), yb.len());
@@ -1233,7 +1031,6 @@ impl<T: Scalar> SolvePlan<T> {
         if m == 0 {
             return;
         }
-        // the first block's product overwrites every entry of `t`
         grow(t, m * nr);
         let below = self.node_chunks(par, m, w, nr);
         let (yp, tp) = (
@@ -1262,14 +1059,6 @@ impl<T: Scalar> SolvePlan<T> {
         });
     }
 
-    /// The backward sweep of node `s` for `nr` right-hand sides with its dense
-    /// products as GEMMs, block by block of the panel ([`Layout`]):
-    /// the final values of the rows below the node gathered and taken off the
-    /// node's rows as one product `L_off^T G`, then the triangle from the last
-    /// block up: each block takes off the rows below it in the node by one
-    /// product and solves its own triangle column by column, last to first, each
-    /// column scaled after its terms. The products run in row chunks on the
-    /// pool when `par` ([`node_chunks`](Self::node_chunks)), within a block's rows.
     fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
         let (c0, w, r0, m, _, panel) = self.node(s);
         let lay = Layout::new(w, m);
@@ -1288,8 +1077,6 @@ impl<T: Scalar> SolvePlan<T> {
             Shared(xb.as_mut_ptr(), xb.len()),
         );
         if m > 0 {
-            // the node's rows `X[i] -= sum_r L[r, i] G[r]`, each block's rows in its
-            // chunks: every full block cut alike, the last one by its own rows
             let nb = w.div_ceil(PANEL_BLOCK);
             let last_rows = w - (nb - 1) * PANEL_BLOCK;
             let (full, last) = (
@@ -1345,8 +1132,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// `L D L^T Y = Y` in place on a row-major `n x nr` block, inside a
-    /// [`sweep`](Self::sweep).
     pub(crate) fn solve_block_inner(
         &self,
         f: &LdltPivots<T>,
@@ -1364,7 +1149,6 @@ impl<T: Scalar> SolvePlan<T> {
         Ok(())
     }
 
-    /// `L Y = Y` inside a [`sweep`](Self::sweep).
     pub(crate) fn forward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let _s = rsprobe::scope!(DEBUG, "forward");
         let shared = Shared(y.as_mut_ptr(), y.len());
@@ -1399,7 +1183,6 @@ impl<T: Scalar> SolvePlan<T> {
         }
     }
 
-    /// `L^T Y = Y` (`U Y = Y`) inside a [`sweep`](Self::sweep).
     pub(crate) fn backward_block(&self, nr: usize, y: &mut [T], work: &mut PlanWork<T>) {
         let _s = rsprobe::scope!(DEBUG, "backward");
         {
@@ -1424,15 +1207,6 @@ impl<T: Scalar> SolvePlan<T> {
     }
 }
 
-/// `v` at least `len` long, only grown: every entry a sweep reads it writes
-/// first.
-fn grow<T: Scalar>(v: &mut Vec<T>, len: usize) {
-    if v.len() < len {
-        v.resize(len, T::zero());
-    }
-}
-
-/// `y -= x`.
 #[inline(always)]
 fn sub_assign<T: Scalar>(y: &mut [T], x: &[T]) {
     let n = y.len().min(x.len());
@@ -1441,7 +1215,6 @@ fn sub_assign<T: Scalar>(y: &mut [T], x: &[T]) {
     }
 }
 
-/// `y += x`.
 #[inline(always)]
 fn add_assign<T: Scalar>(y: &mut [T], x: &[T]) {
     let n = y.len().min(x.len());
@@ -1450,14 +1223,7 @@ fn add_assign<T: Scalar>(y: &mut [T], x: &[T]) {
     }
 }
 
-/// The unit-lower triangle of the columns `jb..je` (scaled by `diag_inv` where it is given,
-/// the `U^T` of an LU) on the row-major right-hand sides `v` (`nr` wide), ROW by row: row
-/// `i` takes `- l_ik v_k` for `k` ascending from `jb`, then its scale. That is the very
-/// sequence of operations the column-oriented sweep applies to it (column `k` subtracts its
-/// multiple from every later row, in ascending `k`), so the result is the same to the bit;
-/// the row form keeps a tile of [`TILE_ROWS`] rows by up to four right-hand sides in
-/// registers across all columns above it, where the column form read and wrote a row of
-/// `nr` values per entry.
+// https://github.com/milanofthe/rslab/issues/289
 fn tri_rows<T: Scalar>(
     v: &mut [T],
     panel: &[T],
@@ -1480,7 +1246,6 @@ fn tri_rows<T: Scalar>(
     }
 }
 
-/// [`tri_rows`] for the right-hand sides `c0..c0 + W`.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn tri_tile<T: Scalar, const W: usize>(
@@ -1500,7 +1265,6 @@ fn tri_tile<T: Scalar, const W: usize>(
         for r in 0..rn {
             acc[r].copy_from_slice(&v[(i + r) * nr + c0..(i + r) * nr + c0 + W]);
         }
-        // the rows above the tile are final
         for k in jb..i {
             let vk = &v[k * nr + c0..k * nr + c0 + W];
             let col = &panel[k * ld + i..k * ld + i + rn];
@@ -1510,7 +1274,6 @@ fn tri_tile<T: Scalar, const W: usize>(
                 }
             }
         }
-        // inside the tile, each row once the rows before it are final
         for r in 0..rn {
             for k in i..i + r {
                 let l = panel[k * ld + i + r];
@@ -1532,13 +1295,6 @@ fn tri_tile<T: Scalar, const W: usize>(
     }
 }
 
-/// The transposed unit-lower triangle of the columns `jb..je` (scaled by `diag_inv` where
-/// it is given) on the row-major right-hand sides `v` (`nr` wide), the block `block` its
-/// column-major panel block (`ld`, row `i` of column `k` at `(k - jb) * ld + i - jb`), last
-/// row first: row `k` takes `- l_ik v_i` for `i` ascending from `k + 1`, then its scale.
-/// The right-hand sides are independent, so a tile of up to [`SOLVE_RHS_TILE`] of them
-/// is kept in registers across a row's terms, in the very order of operations of the
-/// row-at-a-time form, to the bit.
 fn tri_up<T: Scalar>(
     v: &mut [T],
     block: &[T],
@@ -1561,7 +1317,6 @@ fn tri_up<T: Scalar>(
     }
 }
 
-/// [`tri_up`] for the right-hand sides `c0..c0 + W`.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn tri_up_tile<T: Scalar, const W: usize>(
@@ -1578,7 +1333,6 @@ fn tri_up_tile<T: Scalar, const W: usize>(
         let col = &block[(k - jb) * ld..];
         let mut acc = [T::zero(); W];
         acc.copy_from_slice(&v[k * nr + c0..k * nr + c0 + W]);
-        // the rows below `k` in the block are final
         for i in k + 1..je {
             let l = col[i - jb];
             let vi = &v[i * nr + c0..i * nr + c0 + W];
@@ -1595,13 +1349,6 @@ fn tri_up_tile<T: Scalar, const W: usize>(
     }
 }
 
-/// The rows a chunk of a product of `nr` right-hand sides starts at a multiple
-/// of, and its least rows. For one right-hand side the GEMM runs a matrix-vector
-/// product: a column's rows in SIMD lanes from the product's first row, the rows
-/// past its last full lane one by one with other rounding, so a chunk starts at
-/// a multiple of the widest lane ([`SOLVE_GEMV_ROWS`]) and every row keeps the
-/// lane it has in the whole product. For several, two: a single row is a
-/// matrix-vector product inside the GEMM, with its own order of sums.
 fn chunk_align(nr: usize) -> usize {
     if nr == 1 {
         SOLVE_GEMV_ROWS
@@ -1610,9 +1357,6 @@ fn chunk_align(nr: usize) -> usize {
     }
 }
 
-/// The rows of chunk `i` of the `count` chunks of a product of `rows` rows and
-/// `nr` right-hand sides ([`SolvePlan::node_chunks`]): as even as they can be in
-/// units of [`chunk_align`] rows, the last one taking the rows past its last unit.
 fn chunk_rows(i: usize, count: usize, rows: usize, nr: usize) -> std::ops::Range<usize> {
     let align = chunk_align(nr);
     let units = rows / align;
@@ -1626,9 +1370,6 @@ fn chunk_rows(i: usize, count: usize, rows: usize, nr: usize) -> std::ops::Range
     at(i)..at(i + 1)
 }
 
-/// `f(i)` for the `count` chunks of a node's product
-/// ([`node_chunks`](SolvePlan::node_chunks)): each its own task on the pool
-/// where there are several.
 fn run_chunks(count: usize, f: impl Fn(usize) + Sync + Send) {
     let _s = rsprobe::scope!(TRACE, "product");
     rsprobe::add!(TRACE, "chunks", count);
@@ -1639,10 +1380,6 @@ fn run_chunks(count: usize, f: impl Fn(usize) + Sync + Send) {
     }
 }
 
-/// The GEMM mode of the sweeps' node products, each on the calling thread.
-/// Every node product of the level sweeps and of the ancestors' task DAG is
-/// one of the four below ([`fwd_own`], [`fwd_below`], [`bwd_off`], [`bwd_in`]),
-/// cut by rows only, so a row's sums do not depend on who runs them.
 fn node_mode() -> crate::dense::gemm_backend::GemmMode {
     crate::dense::gemm_backend::GemmMode::new(
         gemm::Parallelism::None,
@@ -1650,12 +1387,6 @@ fn node_mode() -> crate::dense::gemm_backend::GemmMode {
     )
 }
 
-/// Forward, a node's own rows `rows` (from `je` on) take the solved block
-/// `jb..je`: `y[rows] -= L[rows, jb..je] y[jb..je]`, `y` the node's rows (`nr`
-/// wide), `block` the diagonal block ([`Layout::blocks`], `ld`).
-///
-/// SAFETY: `y` holds the node's rows and `block` its block; rows `rows` are
-/// written by this call alone, rows `jb..je` and the block only read.
 #[allow(clippy::too_many_arguments)]
 unsafe fn fwd_own<T: Scalar>(
     y: *mut T,
@@ -1666,6 +1397,7 @@ unsafe fn fwd_own<T: Scalar>(
     rows: std::ops::Range<usize>,
     nr: usize,
 ) {
+    debug_assert!(rows.start >= je);
     crate::dense::gemm_backend::gemm(
         rows.len(),
         nr,
@@ -1689,11 +1421,6 @@ unsafe fn fwd_own<T: Scalar>(
     );
 }
 
-/// Forward, the rows `rows` below a node of width `w` take the solved block
-/// `jb..je`: `t[rows] (+)= L_off[rows, jb..je] y[jb..je]`, stored where `!add`
-/// (the first block), `t` the rows below the node (`nr` wide).
-///
-/// SAFETY: as [`fwd_own`]; rows `rows` of `t` are written by this call alone.
 #[allow(clippy::too_many_arguments)]
 unsafe fn fwd_below<T: Scalar>(
     t: *mut T,
@@ -1729,10 +1456,6 @@ unsafe fn fwd_below<T: Scalar>(
     );
 }
 
-/// Backward, a node's rows `rows` (in the block `jb..`) take its `m` rows below:
-/// `x[rows] -= L_off[.., rows]^T g`, `g` their final values gathered (`nr` wide).
-///
-/// SAFETY: as [`fwd_own`]; `g` holds `m` rows.
 unsafe fn bwd_off<T: Scalar>(
     x: *mut T,
     rect: *const T,
@@ -1764,10 +1487,6 @@ unsafe fn bwd_off<T: Scalar>(
     );
 }
 
-/// Backward, a node's rows `rows` of the block `jb..je` take its solved rows
-/// `je..w` in one product: `x[rows] -= L[je..w, rows]^T x[je..w]`.
-///
-/// SAFETY: as [`fwd_own`]; rows `je..w` are only read.
 #[allow(clippy::too_many_arguments)]
 unsafe fn bwd_in<T: Scalar>(
     x: *mut T,
@@ -1779,6 +1498,7 @@ unsafe fn bwd_in<T: Scalar>(
     rows: std::ops::Range<usize>,
     nr: usize,
 ) {
+    debug_assert!(jb <= rows.start && rows.end <= je);
     crate::dense::gemm_backend::gemm(
         rows.len(),
         nr,
@@ -1802,10 +1522,6 @@ unsafe fn bwd_in<T: Scalar>(
     );
 }
 
-/// `D z = y` for the block diagonal (1x1 and 2x2 pivots) of the columns
-/// `cols`, on `nr` right-hand sides stored row-major (`y` holds the rows of
-/// `cols`). A 2x2 block lies inside one supernode's fully-summed block, so a
-/// range of whole supernodes never cuts one.
 fn solve_diagonal<T: Scalar>(
     f: &LdltPivots<T>,
     y: &mut [T],
@@ -1853,9 +1569,9 @@ fn solve_diagonal<T: Scalar>(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_constants::{solve_backward_error, U64};
     use crate::{CscMatrix, LdltSolver, SolverSettings};
 
-    /// A 2D grid Laplacian shifted to be indefinite (2x2 pivots appear).
     fn grid(m: usize, shift: f64) -> CscMatrix<f64> {
         let n = m * m;
         let (mut col_ptr, mut row_idx, mut values) = (vec![0usize], Vec::new(), Vec::new());
@@ -1881,8 +1597,6 @@ mod tests {
         }
     }
 
-    /// A 3D grid Laplacian: wide separator supernodes exercise the blocked,
-    /// parallel ancestor kernels.
     fn grid3d(m: usize) -> CscMatrix<f64> {
         let n = m * m * m;
         let (mut col_ptr, mut row_idx, mut values) = (vec![0usize], Vec::new(), Vec::new());
@@ -1910,8 +1624,6 @@ mod tests {
         }
     }
 
-    /// The normwise backward error of a solve of the symmetric matrix whose
-    /// lower triangle is `a`: `|A x - b|_inf / (|A|_inf |x|_inf + |b|_inf)`.
     fn backward_error(a: &CscMatrix<f64>, x: &[f64], b: &[f64]) -> f64 {
         let n = a.n;
         let (mut r, mut rows) = (b.iter().map(|v| -v).collect::<Vec<f64>>(), vec![0.0; n]);
@@ -1930,18 +1642,13 @@ mod tests {
         inf(&r) / (inf(&rows) * inf(x) + inf(b))
     }
 
-    /// The backward error bound of a stable solve of dimension `n` whose
-    /// elimination grows the entries at most by 2 (a diagonally dominant
-    /// matrix): `2 gamma_n`, `gamma_n = n u / (1 - n u)`.
-    fn bound(n: usize) -> f64 {
+    fn dominant_solve_bound(n: usize) -> f64 {
         let nu = n as f64 * f64::EPSILON / 2.0;
         2.0 * nu / (1.0 - nu)
     }
 
     #[test]
     fn plan_solve_matches_scalar_kernel_and_solves_alike_on_every_pool() {
-        // Whether the matrix is diagonally dominant, so its solves are held
-        // to [`bound`]; the indefinite grid's growth has no a priori bound.
         let cases: Vec<(&str, CscMatrix<f64>, bool)> = vec![
             ("grid 7", grid(7, 0.0), true),
             ("grid 40", grid(40, 0.0), true),
@@ -1953,9 +1660,9 @@ mod tests {
             let within = |x: &[f64], b: &[f64], what: &str| {
                 let eta = backward_error(a, x, b);
                 assert!(
-                    !dominant || eta <= bound(n),
+                    !dominant || eta <= dominant_solve_bound(n),
                     "{name} {what}: backward error {eta:e} over {:e}",
-                    bound(n)
+                    dominant_solve_bound(n)
                 );
             };
             let opts = SolverSettings::default()
@@ -1965,7 +1672,6 @@ mod tests {
             let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
             let x1 = s.solve(&b).unwrap();
             within(&x1, &b, "one thread");
-            // Block solve, columns must agree with single solves.
             let nrhs = 3;
             let bb: Vec<f64> = (0..n * nrhs)
                 .map(|k| ((k * 13) % 11) as f64 - 5.0)
@@ -1974,13 +1680,13 @@ mod tests {
             for c in 0..nrhs {
                 let bc: Vec<f64> = (0..n).map(|i| bb[c * n + i]).collect();
                 let xc = s.solve(&bc).unwrap();
-                for i in 0..n {
-                    assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
-                }
+                let omega = backward_error(a, &xb[c * n..(c + 1) * n], &bc)
+                    .max(backward_error(a, &xc, &bc));
+                assert!(
+                    omega <= solve_backward_error(n, U64),
+                    "{name} column {c}: backward error {omega:e}"
+                );
             }
-            // Every thread budget factors within the bound; the
-            // solves of one factor (made in a pool of one, the bits of the
-            // one-thread factor) give the same bits under every ambient pool.
             let ambient = opts.clone().with_threads(crate::Threads::Ambient);
             let one = rayon::ThreadPoolBuilder::new()
                 .num_threads(1)
@@ -2015,9 +1721,6 @@ mod tests {
     fn plan_falls_back_on_a_structure_off_the_tree() {
         use super::super::panel::PanelFactor;
         use super::{PlanWork, SolvePlan};
-        // Unit `L` of three 1-column supernodes on the tree 0 -> 2, 1 -> 2,
-        // supernode 0 holding row 1 (a sibling, not an ancestor):
-        // L = [[1, 0, 0], [0.5, 1, 0], [0.25, -2, 1]].
         let factor = PanelFactor {
             n: 3,
             sn_col: vec![0, 1, 2, 3],
@@ -2034,7 +1737,6 @@ mod tests {
         );
         assert!(plan.subtrees.is_empty(), "solved as one sequential chain");
         let mut work = PlanWork::default();
-        // L x = b and L^T x = c for x = [1, 2, 3].
         let mut y = vec![1.0, 2.5, -0.75];
         let one = crate::Threads::Fixed(1);
         plan.sweep(&mut work, 1, one, |w| plan.forward_block(1, &mut y, w));
@@ -2044,13 +1746,11 @@ mod tests {
         assert_eq!(y, [1.0, 2.0, 3.0]);
     }
 
-    /// Unsymmetric convection-diffusion grid for the LU plans.
     fn convdiff(m: usize) -> crate::GeneralCsc<f64> {
         let n = m * m;
         let (mut col_ptr, mut row_idx, mut values) = (vec![0usize], Vec::new(), Vec::new());
         for j in 0..n {
             let (x, y) = (j % m, j / m);
-            // Column j holds the entries A[i, j]; A[i, j] for neighbors i.
             if y > 0 {
                 row_idx.push(j - m);
                 values.push(-1.0);
@@ -2079,26 +1779,19 @@ mod tests {
         }
     }
 
-    fn residual_general(a: &crate::GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
+    fn general_backward_error(a: &crate::GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
         let n = a.n;
-        let mut r = b.to_vec();
+        let (mut r, mut rows) = (b.to_vec(), vec![0.0; n]);
         for j in 0..n {
             for e in a.col_ptr[j]..a.col_ptr[j + 1] {
                 r[a.row_idx[e]] -= a.values[e] * x[j];
+                rows[a.row_idx[e]] += a.values[e].abs();
             }
         }
-        let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-        rn / bn
+        let inf = |v: &[f64]| v.iter().map(|z| z.abs()).fold(0.0, f64::max);
+        inf(&r) / (inf(&rows) * inf(x) + inf(b))
     }
 
-    /// The ancestors' task DAG (`forward_dag`, `backward_dag`) solves as the
-    /// level sweeps do, to the bit: a tree cut into few subtrees, so most of
-    /// it lies above the cut, every sweep on the pool, against one thread (the
-    /// level sweeps); LU and LDL^T, one and several right-hand sides, nodes of
-    /// several tiles, every product cut into its finest row chunks, for one
-    /// right-hand side too ([`node_chunks`](super::SolvePlan::node_chunks)), so
-    /// the DAG holds thousands of tasks and their order varies from run to run.
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
         use crate::{LuSolver, OrderingMethod};
@@ -2125,7 +1818,6 @@ mod tests {
         let bb: Vec<f64> = (0..n * nrhs)
             .map(|k| ((k * 13) % 11) as f64 - 5.0)
             .collect();
-        // an ancestor whose product below it runs in several chunks for one right-hand side
         use super::SolvePlan;
         let chunked = |p: &SolvePlan<f64>| {
             p.top.iter().any(|&s| {
@@ -2190,7 +1882,10 @@ mod tests {
             let s = LuSolver::factor(&a, &opts).unwrap();
             let b: Vec<f64> = (0..n).map(|i| ((i * 31) % 17) as f64 - 8.0).collect();
             let x1 = s.solve(&b).unwrap();
-            assert!(residual_general(&a, &x1, &b) < 1e-10, "residual m={m}");
+            assert!(
+                general_backward_error(&a, &x1, &b) <= solve_backward_error(n, U64),
+                "backward error m={m}"
+            );
             let nrhs = 3;
             let bb: Vec<f64> = (0..n * nrhs)
                 .map(|k| ((k * 13) % 11) as f64 - 5.0)
@@ -2199,16 +1894,18 @@ mod tests {
             for c in 0..nrhs {
                 let bc: Vec<f64> = (0..n).map(|i| bb[c * n + i]).collect();
                 let xc = s.solve(&bc).unwrap();
-                for i in 0..n {
-                    assert!((xb[c * n + i] - xc[i]).abs() <= 1e-9 * (1.0 + xc[i].abs()));
-                }
+                let omega = general_backward_error(&a, &xb[c * n..(c + 1) * n], &bc)
+                    .max(general_backward_error(&a, &xc, &bc));
+                assert!(
+                    omega <= solve_backward_error(n, U64),
+                    "m={m} column {c}: backward error {omega:e}"
+                );
             }
-            // Refinement runs through the plans too.
             let (xr, out) = s
                 .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
                 .unwrap();
             assert!(out.steps <= 2);
-            assert!(residual_general(&a, &xr, &b) < 1e-12);
+            assert!(general_backward_error(&a, &xr, &b) <= solve_backward_error(n, U64));
             for threads in [1usize, 2, 5] {
                 let st = LuSolver::factor(&a, &opts.clone().with_threads(threads)).unwrap();
                 assert_eq!(st.solve(&b).unwrap(), x1, "threads={threads}");

@@ -50,37 +50,21 @@ import scipy.io
 import scipy.sparse as sp
 
 HERE = Path(__file__).resolve().parent
-# The private sources of this machine (the module docstring).
 LOCAL = HERE / 'sources.local.toml'
-# The families a build writes (`build --family`), all by default.
 FAMILIES = {'mom', 'circuit', 'fem'}
 
-# Where a family lives (the pool cache rslab-corpus of that machine) and the memory its A/B
-# job asks for: the measured peak of the run with headroom (mom 10.1 GB, circuit 1.1 GB, fem
-# 2.8 GB), but no less than the cold wheel builds need: their resident set stays below 1 GB,
-# yet within a 2 or 4 GB limit they crawled for half an hour on the page cache (40 s at 8 GB).
 PLACEMENT = {'mom': ('euler', '13G'), 'circuit': ('kutta', '8G'), 'fem': ('runge', '8G')}
-# SuiteSparse's file server first, the old University of Florida mirror after it.
 SUITESPARSE_MIRRORS = ['https://sparse.tamu.edu/MM', 'https://www.cise.ufl.edu/research/sparse/MM']
 
-# rapidfem's driven-sweep examples (python/python_src/rapidfem/examples/fd_<name>.py), each
-# up to its second frequency: the first system and its refactorization values. A spread of
-# sizes and terminations: waveguide ports (28k), PML (51k), horn with PML and ABC (140k),
-# lumped port with PML (186k), numerical wave ports (262k). The other examples repeat these
-# classes at sizes up to 5.6M DOF, beyond what the corpus machines factor in minutes.
 FEM_EXAMPLES = ['wr90', 'wr90_pml', 'pyramidal_horn', 'patch_antenna', 'microstrip_line']
-# Systems a sweep dumps per example: the first frequency and the next one.
 FEM_DUMPS = 2
 
-# SuiteSparse FEM matrices for the classes rapidfem does not factor: (group/name, kind).
 SUITESPARSE_FEM = [
     ('Boeing/bcsstk36', 'spd'), ('Boeing/pwtk', 'spd'),
     ('GHS_indef/helm3d01', 'indefinite'), ('GHS_indef/dawson5', 'indefinite'),
     ('Simon/raefsky3', None), ('Norris/torso3', None), ('Lee/fem_filter', None),
 ]
 
-# Systems of the pool cache bench-mtx (dumped by hand from a MoM code in October 2026, the
-# writer in no repository): (name, file, path, note).
 LEGACY = [
     ('mom_sym_46428', 'sym_46428_1_n32460_nd15284_np17176_aux0.mtx', 'ldlt',
      'complex-symmetric near-pattern form of a 32k-unknown A-EFIE system (n = nd + np, '
@@ -98,7 +82,6 @@ def run(cmd, **kw):
     subprocess.run([str(c) for c in cmd], check=True, **kw)
 
 
-# --- the corpus format ----------------------------------------------------------------------
 
 
 def symmetry(a):
@@ -162,7 +145,6 @@ def manifest(out):
     log(f'manifest: {len(systems)} files, {sum(s["bytes"] for s in systems) / 2**30:.1f} GB')
 
 
-# --- building a source --------------------------------------------------------------------
 
 
 def venv(work, name, *packages):
@@ -309,15 +291,10 @@ def build_legacy(src, out, work, only, reuse):
             'note': note + '; right-hand side all ones'})
 
 
-# The sources: the families a source feeds and its `build(src, out, work, only, reuse)`; one
-# from a repository also its pin (repo, commit, the paths a job needs as git pathspecs) and
-# the other pinned trees its build reads (`ships`). A pinned tree without a build is shipped
-# by the sources that name it. The sources of LOCAL join them, a local module's `build` each.
 SOURCES = {
     'rapidfem': {'repo': 'milanofthe/rapidfem', 'commit': 'e917b8018022a1e8994d48accead0262d05aa8cd',
                  'paths': ['.', ':(exclude)python/python_src/rapidfem/ui/frontend-src/static/demo'],
                  'feeds': ['fem'], 'build': build_rapidfem},
-    # the VACASK c6288 decks circuit simulators read
     'circuits': {'repo': 'milanofthe/circuit-reference-suite', 'commit': '6a97c8c6d3d24f5dbd3709a0ca479be3054c5449',
                  'paths': ['cases/vacask_c6288_psp103']},
     'suitesparse': {'feeds': ['circuit', 'fem'], 'build': build_suitesparse},

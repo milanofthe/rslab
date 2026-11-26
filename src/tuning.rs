@@ -104,14 +104,13 @@ impl Calibration {
         c
     }
 
+    // https://github.com/milanofthe/rslab/issues/292
     fn load(fp: u64) -> Option<Self> {
         let s = std::fs::read_to_string(Self::cache_path(fp)).ok()?;
         let mut it = s.split_whitespace();
         let geom_gflops: f64 = it.next()?.parse().ok()?;
         let speedup: f64 = it.next()?.parse().ok()?;
         let speedup_threads: usize = it.next()?.parse().ok()?;
-        // The complex rate is a later field; an older cache file lacks it, so fall
-        // back to a fraction of the real rate rather than failing the whole load.
         let geom_gflops_cplx = it
             .next()
             .and_then(|t| t.parse().ok())
@@ -120,8 +119,6 @@ impl Calibration {
             .next()
             .and_then(|t| t.parse().ok())
             .unwrap_or(FALLBACK_TIME_CV);
-        // Later field; an older cache lacks it - fall back to the linear
-        // interpolation the pre-speedup4 model used.
         let speedup4 = it.next().and_then(|t| t.parse().ok()).unwrap_or_else(|| {
             if speedup_threads > 1 {
                 1.0 + (speedup - 1.0) * (SPEEDUP_ANCHOR_THREADS - 1) as f64
@@ -160,7 +157,6 @@ impl Calibration {
         )
     }
 
-    /// A reasonable default if calibration cannot run (e.g. analyze fails).
     fn fallback(hw: &HardwareInfo) -> Self {
         let speedup = (hw.physical_cores as f64).sqrt().max(1.0);
         Calibration {
@@ -199,12 +195,10 @@ impl Calibration {
         let flops = sym.estimate_memory::<f64>().factor_flops as f64;
         let time_at = |t: usize| -> Option<f64> {
             let opts = SolverSettings::default().with_threads(t);
-            let start = crate::clock::Instant::now();
+            let start = rslab_ordering_core::clock::Instant::now();
             sym.factor(&a, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
-        // Repeat the single-thread factor a few times for the timing noise floor
-        // (coefficient of variation), which sets the tuner's deviate guard.
         let mut samples = Vec::new();
         for _ in 0..CALIB_REPEATS {
             match time_at(1) {
@@ -218,19 +212,7 @@ impl Calibration {
         let t1 = mean;
         let geom_gflops = (flops / t1.max(TIME_FLOOR)) / GIGA;
 
-        // Parallel speedup on a larger, **complex** grid (~ 33k DOFs). Complex
-        // arithmetic is the flop-dense regime where the thread choice matters
-        // and parallel scaling is real; the small/real grid is closer to
-        // bandwidth-bound and measures a speedup (~1.3x on a 12-core desktop)
-        // that would make the cost model under-provision flop-heavy systems by
-        // 2-4x. For pure-f64 workloads this curve errs toward a few extra
-        // workers - the cheap direction (the critical-path floor still caps
-        // chain-like matrices at one worker).
-        // MetisND ordering: the speedup measurement captures what the machine
-        // *can* do on a well-parallelizable elimination tree (short critical
-        // path); per-matrix structure is the cost model's job (critical-path
-        // floor + residual), not the calibration's. A minimum-degree ordering
-        // here confounds machine capability with tree shape.
+        // https://github.com/milanofthe/rslab/issues/292
         let ab = grid3d_spd::<Complex<f64>>(CALIB_GRID_LARGE);
         let opts_nd =
             SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::MetisND);
@@ -239,12 +221,11 @@ impl Calibration {
         };
         let time_b = |t: usize| -> Option<f64> {
             let opts = opts_nd.clone().with_threads(t);
-            let start = crate::clock::Instant::now();
+            let start = rslab_ordering_core::clock::Instant::now();
             symb.factor(&ab, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
-        // Warm-up factor: first-touch page faults would inflate the first
-        // timing (and with it the measured speedup).
+        // https://github.com/milanofthe/rslab/issues/292
         if time_b(hw.physical_cores.max(1)).is_none() {
             return Self::fallback(hw);
         }
@@ -255,13 +236,11 @@ impl Calibration {
         ) else {
             return Self::fallback(hw);
         };
-        // Complex rate: same grid, complex-typed, factored once at one thread. The
-        // structure (fill, flops proxy) is identical; only the per-flop cost differs.
         let ac = grid3d_spd::<Complex<f64>>(CALIB_GRID_SMALL);
         let geom_gflops_cplx = match LdltSymbolic::analyze(&ac, &SolverSettings::default()) {
             Ok(symc) => {
                 let fc = symc.estimate_memory::<Complex<f64>>().factor_flops as f64;
-                let start = crate::clock::Instant::now();
+                let start = rslab_ordering_core::clock::Instant::now();
                 match symc.factor(&ac, &SolverSettings::default().with_threads(1)) {
                     Ok(_) => (fc / start.elapsed().as_secs_f64().max(TIME_FLOOR)) / GIGA,
                     Err(_) => geom_gflops / CPLX_RATE_DIV,
@@ -314,10 +293,6 @@ pub fn install_diagnose() -> Calibration {
     Calibration::load_or_measure(&hw)
 }
 
-/// Cached-only calibration lookup for the heuristic default path: returns
-/// `(physical_cores, calibration)` if [`install_diagnose`] has written a cache
-/// for this machine, else `None`. Never measures. Memoized per process so the
-/// per-factor cost is a single `OnceLock` read.
 pub(crate) fn cached_calibration() -> Option<(usize, Calibration)> {
     static CACHE: std::sync::OnceLock<Option<(usize, Calibration)>> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -346,19 +321,9 @@ pub fn recommend_threads_cost_model(
         max_threads
     };
     let rate = calib.rate_for(estimate.value_bytes);
-    // Learned residual on the analytical speedup: the bare
-    // `flops / max(crit, flops/speedup)` model mispredicts the achieved scaling
-    // systematically --- the critical-path flops overstate the true serial
-    // fraction (sibling subtrees overlap), so it is too pessimistic on
-    // serial-heavy trees and too optimistic on wide ones. A ridge fit of
-    // log(measured/predicted speedup) on the dimensionless structural features
-    // (fit offline by `benches/fit_residual.py`, 26% held-out RMSE reduction under
-    // leave-one-matrix-out CV) corrects both. `amdahl_frac` carries almost all of
-    // the signal, validating the critical-path feature. Clamped so the residual
-    // refines the calibrated base, never swings the choice wildly.
     let residual_ln = |t: usize| -> f64 {
         if t <= 1 {
-            return 0.0; // t=1 is the speedup reference: no correction
+            return 0.0;
         }
         let flops = estimate.factor_flops.max(1) as f64;
         let crit = estimate.critical_path_flops.max(1) as f64;
@@ -368,29 +333,20 @@ pub fn recommend_threads_cost_model(
             + TIME_RESIDUAL[1] * amdahl
             + TIME_RESIDUAL[2] * (t as f64).ln()
             + TIME_RESIDUAL[3] * width.ln();
-        r.clamp(-TIME_RESIDUAL_CLAMP, TIME_RESIDUAL_CLAMP) // exp factor in [0.50, 2.01]
+        r.clamp(-TIME_RESIDUAL_CLAMP, TIME_RESIDUAL_CLAMP)
     };
-    // Corrected time: predicted speedup s -> s * exp(residual), so time /= that,
-    // but never below the hard critical-path floor. The residual is linear, so at
-    // `amdahl_frac -> 1` (a true chain) it would extrapolate to a speedup the
-    // physics forbids; clamping to the critical-path floor (the runtime with
-    // infinite workers) keeps a critical-path-bound matrix at one worker.
     let floor_ms = estimate.est_runtime_ms_threaded(rate, f64::MAX);
     let time = |t: usize| {
         let corrected =
             estimate.est_runtime_ms_threaded(rate, calib.speedup_for(t)) * (-residual_ln(t)).exp();
         corrected.max(floor_ms)
     };
-    // Evaluate the whole candidate ladder and keep the fewest workers within 3%
-    // of the best predicted time. An early break at the first non-improving
-    // step is wrong for a knee-shaped speedup curve (2 -> 4 may be flat while
-    // 8 still wins), which made the model under-provision by 2-4x.
     let mut best_t = 1;
     let mut best = time(1);
+    // https://github.com/milanofthe/rslab/issues/292
     for t in THREAD_LADDER.into_iter().filter(|&t| t <= cap) {
         let tt = time(t);
         if tt < best * THREAD_GAIN_MARGIN {
-            // >3% faster: worth the extra workers.
             best = tt;
             best_t = t;
         }
@@ -398,10 +354,6 @@ pub fn recommend_threads_cost_model(
     best_t
 }
 
-/// 3D 7-point Laplacian (k^3 grid, Dirichlet, SPD, lower triangle), generic over
-/// the scalar type - the calibration's representative matrix. Complex-typed, it is
-/// real-valued but factors through the complex kernel, so it times the complex
-/// proxy-flops/s rate.
 fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
     let n = k * k * k;
     let idx = |x: usize, y: usize, z: usize| (z * k + y) * k + x;
@@ -414,7 +366,7 @@ fn grid3d_spd<T: Scalar>(k: usize) -> CscMatrix<T> {
                 let p = idx(x, y, z);
                 rows.push(p);
                 cols.push(p);
-                vals.push(T::from_real(6.0)); // lit: 7-point stencil diagonal
+                vals.push(T::from_real(CALIB_STENCIL_DIAGONAL));
                 let mut nb = |q: usize| {
                     let (hi, lo) = if p >= q { (p, q) } else { (q, p) };
                     rows.push(hi);
@@ -450,8 +402,6 @@ mod tests {
 
     #[test]
     fn probe_takes_the_containers_memory() {
-        // in a cgroup with a memory limit (a container) the probe reports the container's RAM,
-        // never the host's beyond it (#150)
         let hw = HardwareInfo::probe();
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
@@ -472,7 +422,6 @@ mod tests {
 
     #[test]
     fn cost_model_thread_count_respects_critical_path() {
-        // Synthetic calibration: peak speedup 6 at 12 threads.
         let calib = Calibration {
             geom_gflops: 2.0,
             geom_gflops_cplx: 0.7,
@@ -489,14 +438,12 @@ mod tests {
             panels_all_bytes: 0,
             panel_live_peak_bytes: 0,
             transient_peak_bytes: 0,
-            factor_flops: 100_000_000_000, // 1e11 total work
+            factor_flops: 100_000_000_000,
             critical_path_flops: 0,
             max_tree_width: 256,
         };
-        // Wide tree (critical path 1% of work): more threads keep paying off.
-        est.critical_path_flops = 1_000_000_000; // 1e9
+        est.critical_path_flops = 1_000_000_000;
         let wide = recommend_threads_cost_model(&est, &calib, 24, 24);
-        // Critical-path-bound (chain: critical path == total work): no parallel gain.
         est.critical_path_flops = est.factor_flops;
         let chain = recommend_threads_cost_model(&est, &calib, 24, 24);
         assert!(
