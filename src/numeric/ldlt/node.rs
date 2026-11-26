@@ -16,12 +16,9 @@ use crate::numeric::supernodal::LlSchedule;
 use crate::scalar::Scalar;
 use crate::symbolic::SymbolicFactorization;
 
-/// What a multiply-add of the descendants' updates costs: the update of a large
-/// node goes as wide as its work is worth.
 static UPDATE_RATE: crate::parallel::ScalarRates =
     crate::parallel::ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
 
-/// The front's row of the global index `g`.
 #[inline]
 fn local_of(
     gloc: &crate::numeric::supernodal::Gloc<'_>,
@@ -30,11 +27,6 @@ fn local_of(
     gloc[g as usize] as usize
 }
 
-/// Factor one supernode's panel: assemble `A`, apply every descendant's `cmod`
-/// update (BLAS-3 with scalar fallback), then `cdiv` (partial 1x1 LDL^T). Reads
-/// only already-factored descendant panels and their `D` from the emit state,
-/// so sibling subtrees run concurrently. Writes the factored panel and `D`
-/// there.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ll_factor_node<T: Scalar>(
     s: usize,
@@ -59,10 +51,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
     let lay = Layout::new(ncol, nrow - ncol);
     debug_assert_eq!(panel.len(), lay.len());
 
-    // Global-to-local rows (narrow entries halve the table's random-access
-    // footprint); restored when the node returns.
     let gloc = crate::numeric::supernodal::Gloc::new(n, sched.rows(s));
-    // Assemble A's lower-triangle columns of this supernode.
     for p in 0..ncol {
         let c = first + p;
         for (g, v) in inp.col(c) {
@@ -86,15 +75,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
         let (spans, tiled) = (&plan.spans, plan.forks);
         let seq_gemm_par = if plan.forks { ll_gemm_par } else { usize::MAX };
         if tiled {
-            // The update in units of the panel's layout: ranges of its column
-            // blocks, each with its rows from its diagonal down or, where a
-            // range alone holds more than a unit's share, cut into ranges of
-            // row blocks too, about rspool's pieces per worker of them per
-            // worker of the pool ([`unit_share`]), a range at most the Schur
-            // tile wide. Each unit takes every updater's contribution in
-            // updater order, one product per updater, so its sums depend on
-            // the node and the thread count alone; the units go to the pool
-            // as pieces of their own.
             let nb = PANEL_BLOCK;
             let ncb = ncol.div_ceil(nb);
             let nrb = ncb + (nrow - ncol).div_ceil(nb);
@@ -114,9 +94,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     (r, (r + nb).min(nrow))
                 }
             };
-            // Per column block the updaters landing in it, in updater order,
-            // and their landing rows `[q0, q1)` there; the multiply-adds of
-            // every column block and row block.
             let mut weight = vec![0.0f64; ncb * nrb];
             let mut landing: Vec<(usize, u32, u32, u32)> = Vec::new();
             for (
@@ -145,8 +122,10 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     c = ce;
                 }
             }
-            // stable: each column block's updaters stay in updater order
             landing.sort_by_key(|e| e.0);
+            debug_assert!(landing
+                .windows(2)
+                .all(|w| w[0].0 < w[1].0 || w[0].1 <= w[1].1));
             let mut by_cb = vec![0usize; ncb + 1];
             for e in &landing {
                 by_cb[e.0 + 1] += 1;
@@ -160,7 +139,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 .map(|cb| weight[cb * nrb..(cb + 1) * nrb].iter().sum())
                 .collect();
             let widest = (kt.k.schur_tile / nb).max(1);
-            // The units `(ca, ce, rb0, rb1)`: column blocks `ca..ce`, row blocks `rb0..rb1`.
             let mut units: Vec<(usize, usize, usize, usize)> = Vec::new();
             for (ca, ce) in crate::numeric::supernodal::cut(&col_w, share, widest, 0) {
                 let row_w: Vec<f64> = (ca..nrb)
@@ -178,8 +156,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 let (ca, ce, rb0, rb1) = units[u];
                 let mut bufs = pools.cmod.take();
                 let (_, vd_buf, u_buf) = &mut *bufs;
-                // The updaters landing in the unit's columns, each once, in
-                // updater order, with their landing rows there.
                 let mut ups: Vec<(u32, u32, u32)> = landing[by_cb[ca]..by_cb[ce]]
                     .iter()
                     .map(|e| (e.1, e.2, e.3))
@@ -200,10 +176,8 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     let nck = sym.supernodes[kk].ncol;
                     let ok = &sched.rows(kk)[nck..];
                     let nok = ok.len();
-                    // The updater's off-block rows, column `ck` at `rk + ck * nok`.
                     let rk = Layout::new(nck, nok).rect();
                     let npk = q1 - q0;
-                    // Its rows in the unit's row blocks (from its landing rows on).
                     let below = |r: usize| q0 + ok[q0..].partition_point(|&g| g < rows_s[r]);
                     let a = if diag { q0 } else { below(r0) };
                     let b = if r1 == nrow { nok } else { below(r1) };
@@ -214,7 +188,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     // are written and never mutated again.
                     let pk: &[T] = unsafe { emit.arena.slot(kk) };
                     let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
-                    // G = (kk's rows q0..q1) * D, column-major npk x nck.
                     crate::memory::grow(vd_buf, npk * nck);
                     let mut ck = 0;
                     while ck < nck {
@@ -241,8 +214,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                     // disjoint; strides in bounds.
                     unsafe {
                         if diag {
-                            // From the landing rows down: on and below the
-                            // diagonal only.
                             lower_tile_gemm(
                                 &mut *u_buf,
                                 mrows,
@@ -299,7 +270,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
             crate::parallel::each(units.len(), work, unit);
         }
 
-        // Sequential per-update cmod (small nodes / small total update work).
         let mut bufs = pools.cmod.take();
         let (vc, vd_buf, u_buf) = &mut *bufs;
         for &Span {
@@ -314,18 +284,11 @@ pub(super) fn ll_factor_node<T: Scalar>(
             // so its panel/dval cells are written and never mutated again.
             let pk: &[T] = unsafe { emit.arena.slot(kk) };
             let (dk, dsub_k, two_k) = unsafe { emit.d_of(kk, nck) };
-            // Bunch-Kaufman block structure of `kk`'s D (pivoted column order). The
-            // cmod `L*D*L^T` is invariant under `kk`'s internal column permutation, so
-            // only the block-diagonal `D`-apply has to honor the 2x2 blocks.
             let npk = p1 - p0;
-            // Gate on the REAL work (rows >= p0); the scalar path already
-            // iterates from the target block, so small tails route there.
             if (nok - p0) * npk * nck < ll_gemm_gate {
                 crate::memory::grow(vc, nck);
                 for c_idx in p0..p1 {
                     let tcol = ok[c_idx] as usize - first;
-                    // vc = D * (column `c_idx` of kk's off-diagonal block), with D
-                    // block-diagonal (1x1 and complex-symmetric 2x2 blocks).
                     let mut ck = 0;
                     while ck < nck {
                         let a = pk[rk + c_idx + ck * nok];
@@ -352,9 +315,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 }
             } else {
                 crate::memory::grow(vd_buf, npk * nck);
-                // G = (kk's in-panel off-diagonal block) * D, stored column-major as
-                // `vd_buf[c + ck*npk]`. D is block-diagonal (1x1 and 2x2 blocks); a
-                // 2x2 block mixes its two columns. GEMM below is unchanged.
                 let mut ck = 0;
                 while ck < nck {
                     if two_k[ck] {
@@ -374,18 +334,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         ck += 1;
                     }
                 }
-                // Only rows >= p0 land in (or below) the target block: computing
-                // the full `nok`-tall product and discarding rows `< p0` in the
-                // write-back wasted `p0*npk*nck` flops per update - large for
-                // updates into high supernodes, where most of the updater's
-                // off-diagonal rows lie above the target. Mirror the LU twin:
-                // offset the lhs by `p0` and compute `mrows = nok - p0` rows.
-                // The write-back below also reads only rows `>= c` per column
-                // (the symmetric lower part), so the product is computed
-                // tile-wise from each tile's diagonal downward - the same
-                // `lower_tile_gemm` that serves the panel Schur updates. For
-                // updates into the topmost supernodes (`mrows ~ npk`) the full
-                // rectangle wasted another ~half of the flops.
                 let mrows = nok - p0;
                 crate::memory::grow(u_buf, mrows * npk);
                 // SAFETY: lhs (`pk` off-diag block from row p0, read), rhs
@@ -420,13 +368,6 @@ pub(super) fn ll_factor_node<T: Scalar>(
     ll_cdiv_emit(s, sym, sched, pools, emit, perturb_floor, kt, panel)
 }
 
-/// Heap bytes [`ll_factor_node`] allocates for supernode `s` while it runs,
-/// for the memory plan: the tiled cmod's per-slab buffers on up to
-/// `workers` threads at once, or the sequential cmod's buffers, which stay
-/// allocated through the cdiv ([`ll_cdiv_scratch`](super::bunch_kaufman::ll_cdiv_scratch));
-/// the largest split planes its GEMMs take on a worker (complex fields)
-/// and how many workers may take them at once. Replays the kernel's plan
-/// and growth of its buffers.
 pub(super) fn ll_node_scratch<T: Scalar>(
     s: usize,
     sym: &SymbolicFactorization,
@@ -456,8 +397,6 @@ pub(super) fn ll_node_scratch<T: Scalar>(
         (nck, &sched.rows(kk)[nck..])
     };
     if plan.forks {
-        // A unit's buffers per worker: `L D` of an updater over the unit's
-        // columns (at most the Schur tile), its product over the rows below.
         let nb = ((k.schur_tile / PANEL_BLOCK).max(1) * PANEL_BLOCK).min(ncol.max(1));
         let (mut vd, mut u, mut slab_planes) = (0, 0, 0);
         for sp in &plan.spans {
