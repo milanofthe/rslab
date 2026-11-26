@@ -87,7 +87,6 @@ pub struct CscLayout {
     n: usize,
     col_ptr: Vec<usize>,
     row_idx: Vec<usize>,
-    /// Entry `k` -> its slot; duplicate positions share one.
     slot: Vec<usize>,
 }
 
@@ -108,7 +107,6 @@ impl CscLayout {
                 "CscLayout: index ({r}, {c}) out of bounds for {n}x{n}"
             )));
         }
-        // Bucket the entries by column, then sort each column by row.
         let mut col_start = vec![0usize; n + 1];
         for &c in cols {
             col_start[c + 1] += 1;
@@ -253,7 +251,6 @@ mod tests {
 
     #[test]
     fn layout_sorts_dedups_and_maps_entries() {
-        // Entries out of order with a duplicate (0, 0).
         let rows = [1, 0, 0, 0];
         let cols = [1, 1, 0, 0];
         let l = CscLayout::new(2, &rows, &cols).unwrap();
@@ -285,11 +282,9 @@ mod tests {
 
     #[test]
     fn structural_rank_and_transpose_slots() {
-        // Column 1 empty: rank 1.
         let l = CscLayout::new(2, &[0, 1], &[0, 0]).unwrap();
         assert_eq!(l.structural_rank(), 1);
         assert!(l.transpose_slots().is_none());
-        // Full 2x2: rank 2, slots (0,0) (1,0) (0,1) (1,1) pair 0 2 1 3.
         let l = CscLayout::new(2, &[0, 1, 0, 1], &[0, 0, 1, 1]).unwrap();
         assert_eq!(l.structural_rank(), 2);
         assert_eq!(l.transpose_slots().unwrap(), vec![0, 2, 1, 3]);
