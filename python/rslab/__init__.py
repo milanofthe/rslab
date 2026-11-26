@@ -113,9 +113,7 @@ from ._rslab import (
 )
 
 __all__ = [
-    # one-shot
     "spsolve",
-    # factor handles
     "auto",
     "ldlt",
     "lu",
@@ -124,24 +122,20 @@ __all__ = [
     "Ldlt",
     "Lu",
     "Klu",
-    # symbolic analysis
     "analyze",
     "AutoSymbolic",
     "LdltSymbolic",
     "LuSymbolic",
     "KluSymbolic",
-    # configuration
     "Settings",
     "KluSettings",
     "Interrupt",
-    # Krylov
     "gmres",
     "gmres_block",
     "cocg",
     "cocr",
     "KrylovResult",
     "Recycle",
-    # machine and logging
     "install_diagnose",
     "set_log_level",
     "log_level",
@@ -150,8 +144,7 @@ __all__ = [
 
 __version__ = _rslab.__version__
 
-# The four scalar fields the Rust core supports, by NumPy dtype.
-_SUPPORTED = (np.float64, np.float32, np.complex128, np.complex64)
+_SUPPORTED_DTYPES = (np.float64, np.float32, np.complex128, np.complex64)
 
 
 def _require_scipy():
@@ -165,8 +158,7 @@ def _require_scipy():
 
 
 def _normalize_dtype(data: np.ndarray) -> np.ndarray:
-    """Coerce ``data`` to one of the four supported dtypes (widening if needed)."""
-    if data.dtype.type in _SUPPORTED:
+    if data.dtype.type in _SUPPORTED_DTYPES:
         return data
     if np.iscomplexobj(data):
         return data.astype(np.complex128)
@@ -174,13 +166,10 @@ def _normalize_dtype(data: np.ndarray) -> np.ndarray:
 
 
 def _lower_csc(A):
-    """Lower triangle of a symmetric matrix as a sorted, summed CSC matrix."""
     sp = _require_scipy()
     A = sp.csc_matrix(A)
     n = A.shape[0]
     if n == A.shape[1] and A.has_canonical_format:
-        # Sorted rows without duplicates: each column's lower part is a suffix,
-        # cut out in one pass without SciPy's COO round trip.
         indptr, indices, data = _rslab.lower_triangle(n, A.indptr, A.indices, A.data)
         L = sp.csc_matrix((data, indices, indptr), shape=A.shape)
         L.has_canonical_format = True
@@ -192,18 +181,15 @@ def _lower_csc(A):
 
 
 def _full_csc(A):
-    """Full matrix as a sorted, summed CSC matrix (both triangles, as given)."""
     sp = _require_scipy()
     A = sp.csc_matrix(A)
     if not A.has_canonical_format:
-        # A CSC input shares its arrays with `A`: sort and sum a copy, not them.
         A = A.copy()
         A.sum_duplicates()
     return A
 
 
 def _parts(M):
-    """``(n, indptr, indices, data)`` of a prepared CSC matrix, as the core wants them."""
     n = M.shape[0]
     if M.shape[1] != n:
         raise ValueError(f"matrix must be square, got {M.shape}")
@@ -217,11 +203,6 @@ def _parts(M):
 
 def _csc_parts(A, path: str):
     return _parts(_lower_csc(A) if path == "ldlt" else _full_csc(A))
-
-
-# ---------------------------------------------------------------------------
-# Factor handles
-# ---------------------------------------------------------------------------
 
 
 def ldlt(A, *, settings: Settings | None = None, **kwargs) -> Ldlt:
@@ -426,11 +407,6 @@ def auto(A, *, settings: Settings | None = None, klu_settings: KluSettings | Non
                               symmetry_tol=symmetry_tol, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Symbolic analysis
-# ---------------------------------------------------------------------------
-
-
 def analyze(A, path: str = "auto", *, settings=None, **kwargs):
     """Symbolic analysis of the pattern of ``A``: analyze once, factor many.
 
@@ -490,11 +466,6 @@ def analyze(A, path: str = "auto", *, settings=None, **kwargs):
     if path == "klu":
         return _rslab.analyze_klu(*_csc_parts(A, "klu"), settings=settings, **kwargs)
     raise ValueError(f"path must be 'auto', 'ldlt', 'lu' or 'klu', got {path!r}")
-
-
-# ---------------------------------------------------------------------------
-# Krylov solvers
-# ---------------------------------------------------------------------------
 
 
 def gmres(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL, maxit: int = _rslab.KRYLOV_MAX_ITER,
@@ -652,18 +623,11 @@ def cocr(A, b, M=None, *, tol: float = _rslab.KRYLOV_TOL,
 
 
 def _cast_operator(parts, dtype_name: str):
-    """The operator tuple with its values cast to the preconditioner's dtype."""
     n, indptr, indices, data = parts
     return (n, indptr, indices, np.ascontiguousarray(data, dtype=np.dtype(dtype_name)))
 
 
-# ---------------------------------------------------------------------------
-# One-shot
-# ---------------------------------------------------------------------------
-
-
 def _match_dtype(b: np.ndarray, dtype_name: str) -> np.ndarray:
-    """``b`` as a contiguous array in the factor's dtype."""
     return np.ascontiguousarray(b, dtype=np.dtype(dtype_name))
 
 
@@ -728,7 +692,6 @@ def spsolve(A, b, *, symmetric: bool | None = None, refine: int = 0, **kwargs):
         return f.solve(rhs, refine)
     if rhs.ndim == 2:
         if refine:
-            # Multi-RHS refinement: refine each column independently.
             cols = [f.solve(np.ascontiguousarray(rhs[:, c]), refine) for c in range(rhs.shape[1])]
             return np.stack(cols, axis=1)
         return f.solve_many(rhs)

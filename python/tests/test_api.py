@@ -35,11 +35,6 @@ def _circuit(n, seed=2):
     return (d + off).tocsc()
 
 
-# ---------------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------------
-
-
 def test_settings_roundtrip_and_repr():
     floor = 1e-4
     s = rslab.Settings(threads=2, ordering="metis", preconditioner=floor, relax=(128, 32))
@@ -49,7 +44,6 @@ def test_settings_roundtrip_and_repr():
     assert d["preconditioner"] == floor
     assert d["relax"] == (128, 32)
     assert "Settings(" in repr(s) and "ordering='metis'" in repr(s)
-    # Defaults: the ordering race, the capped thread predictor.
     assert rslab.Settings().to_dict()["ordering"] == "auto"
     assert rslab.Settings().to_dict()["threads"] is None
 
@@ -57,8 +51,6 @@ def test_settings_roundtrip_and_repr():
 def test_lu_matching_setting():
     assert rslab.Settings().to_dict()["matching"] is True
     assert rslab.Settings(matching=False).to_dict()["matching"] is False
-    # The matching runs only where the diagonal cannot pivot: a full
-    # diagonal is analyzed as given, a row swap is matched back.
     A = _general(200)
     assert rslab.lu(A).diagnostics()["decisions"]["scaling"] == "TwoSidedRowCol"
     P = sp.eye(200, format="csc")[np.r_[1, 0, 2:200]]
@@ -68,9 +60,6 @@ def test_lu_matching_setting():
 
 
 def test_lu_equilibration_setting():
-    # The LU equilibrates one step by default, iterated on request: rows and
-    # columns of unrelated scale end with every maximum at one, no pivot under
-    # the static floor, and a solve to roundoff.
     rng = np.random.default_rng(3)
     A = _general(400)
     r, c = 10.0 ** rng.integers(-6, 7, 400), 10.0 ** rng.integers(-6, 7, 400)
@@ -145,11 +134,6 @@ def test_interrupt_cancels_factorization():
     assert rslab.lu(_general(400), interrupt=stop).n == 400
 
 
-# ---------------------------------------------------------------------------
-# Symbolic reuse
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("path", ["ldlt", "lu", "klu"])
 def test_analyze_then_factor_sweep(path):
     n = 300
@@ -176,13 +160,11 @@ def test_analyze_then_factor_sweep(path):
     for scale in (1.0, 2.5):
         f = sym.factor(prepared.data * scale)
         assert backward_error(A * scale, f.solve(b), b) <= solve_backward_error(n, U64)
-    # Numeric settings can be overridden at factor time.
     f = sym.factor(prepared.data, threads=1) if path != "klu" else sym.factor(prepared.data, pivot_threshold=1.0)
     assert backward_error(A, f.solve(b), b) <= solve_backward_error(n, U64)
 
 
 def _grid(m, dtype=np.float64):
-    """An ``m x m`` grid Laplacian: supernodal work from ``m`` near 70 on."""
     t = sp.diags([-1.0, 4.0, -1.0], [-1, 0, 1], shape=(m, m))
     s = sp.diags([-1.0, -1.0], [-1, 1], shape=(m, m))
     return (sp.kron(sp.eye(m), t) + sp.kron(s, sp.eye(m))).astype(dtype).tocsc()
@@ -200,7 +182,6 @@ def test_analyze_auto_routes_by_work():
     f = big.factor(A)
     assert f.backend == "ldlt"
     assert backward_error(A, f.solve(b), b) <= solve_backward_error(A.shape[0], U64)
-    # The same pattern with one mirror pair broken: the LU takes it, in place.
     A2 = A.tolil()
     A2[0, 1] = -0.5
     A2 = A2.tocsc()
@@ -211,8 +192,6 @@ def test_analyze_auto_routes_by_work():
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
 def test_auto_factor_every_field(dtype):
-    # Circuit-shaped: sparse work, KLU; a random matrix of this density
-    # fills in to supernodal work, LU.
     assert rslab.auto(_general(200, dtype=dtype)).backend == "lu"
     A = _circuit(200).astype(dtype).tocsc()
     f = rslab.auto(A)
@@ -241,7 +220,6 @@ def test_spsolve_takes_the_automatic_path():
     assert backward_error(A, rslab.spsolve(A, b), b) <= solve_backward_error(A.shape[0], U64)
     G = _general(150)
     assert backward_error(G, rslab.spsolve(G, np.ones(150)), np.ones(150)) <= solve_backward_error(150, U64)
-    # Settings keywords configure the supernodal paths, which then take it.
     x = rslab.spsolve(G, np.ones(150), preconditioner=1e-8, refine=2)
     assert backward_error(G, x, np.ones(150)) <= solve_backward_error(150, U64)
 
@@ -259,11 +237,6 @@ def test_symbolic_settings_carry_explicit_ordering():
     assert f.diagnostics()["decisions"]["ordering_used"].lower().startswith("rcm")
 
 
-# ---------------------------------------------------------------------------
-# Krylov entry points
-# ---------------------------------------------------------------------------
-
-
 def test_krylov_result_unpacks_and_has_attributes():
     A = _general(200)
     b = np.ones(200)
@@ -278,7 +251,7 @@ def test_krylov_result_unpacks_and_has_attributes():
 
 def test_gmres_preconditioned_by_other_factor():
     A = _general(300)
-    A2 = A + sp.eye(300) * 0.5      # a nearby operator
+    A2 = A + sp.eye(300) * 0.5
     M = rslab.lu(A)
     b = np.ones(300)
     tol = 1e-10
@@ -323,11 +296,6 @@ def test_handle_krylov_methods_accept_operator_override():
     assert r.converged and residual_norm(A2, r.x, b) <= krylov_bound(A2, r.x, b, tol) + drift
 
 
-# ---------------------------------------------------------------------------
-# Refinement policy and logging
-# ---------------------------------------------------------------------------
-
-
 def test_diagnostics_report_counts():
     A = _spd(300)
     f = rslab.ldlt(A)
@@ -350,8 +318,6 @@ def test_solve_refine_target_and_measure():
 
 
 def _floored_saddle(m=10, n2=24):
-    # [K B; B^T 0] with every third constraint a copy of the one before:
-    # singular, so static pivoting lifts pivots.
     n1 = m * m
     t = []
     for j in range(n1):
@@ -425,11 +391,6 @@ def test_python_logging_bridge():
     assert records
 
 
-# ---------------------------------------------------------------------------
-# API reference
-# ---------------------------------------------------------------------------
-
-
 def test_api_reference_is_current():
     """docs/api.md is generated from the docstrings; regenerate with
     `python tools/gen_api_reference.py` when they change."""
@@ -452,7 +413,6 @@ def test_symbolic_factor_and_refactor_accept_the_matrix():
     A = sp.random(n, n, density=0.15, random_state=rng, format="csc") + 10.0 * sp.eye(n, format="csc")
     S = (A + A.T).tocsc()
     b = rng.standard_normal(n)
-    # LDLT: the symbolic factor takes the full symmetric matrix (lower triangle extracted)
     sym = rslab.analyze(S, "ldlt")
     f = sym.factor(S)
     bound = solve_backward_error(n, U64)
@@ -460,10 +420,8 @@ def test_symbolic_factor_and_refactor_accept_the_matrix():
     S2 = (S * 2.0).tocsc()
     f2 = sym.factor(S2)
     assert backward_error(S2, f2.solve(b), b) <= bound
-    # the value array in the analysis order still works
     f3 = sym.factor(sp.tril(S2).tocsc().data)
     assert np.allclose(f3.solve(b), f2.solve(b))
-    # LU and KLU take the full matrix
     G = A.tocsc()
     lu = rslab.analyze(G, "lu").factor(G)
     assert backward_error(G, lu.solve(b), b) <= bound
@@ -471,7 +429,6 @@ def test_symbolic_factor_and_refactor_accept_the_matrix():
     G2 = (G * 3.0).tocsc()
     k.refactor(G2)
     assert backward_error(G2, k.solve(b), b) <= bound
-    # a different pattern is refused
     D = (G + sp.eye(n, k=1, format="csc")).tocsc()
     with pytest.raises(ValueError):
         rslab.analyze(G, "lu").factor(D)
@@ -492,15 +449,12 @@ def test_symbolic_factor_reads_the_matrix_as_its_values(path, index):
     sym = rslab.analyze(S, path)
     prepared = rslab._lower_csc(S) if path == "ldlt" else rslab._full_csc(S)
     x = sym.factor(prepared.data).solve(b)
-    # the matrix gives the factor of its value array, bit for bit
     assert np.array_equal(sym.factor(S).solve(b), x)
-    # a matrix in another storage order (unsorted rows, a split duplicate) is the same
-    # matrix: prepared like at analysis time, and the caller's arrays stay as they were
     indptr, indices, values = [0], [], []
     for j in range(n):
         rows = S.indices[S.indptr[j]:S.indptr[j + 1]][::-1]
         vals = S.data[S.indptr[j]:S.indptr[j + 1]][::-1].copy()
-        vals[0] /= 2.0  # half of it here, the other half a duplicate at the column's end
+        vals[0] /= 2.0
         indices += [*rows, rows[0]]
         values += [*vals, vals[0]]
         indptr.append(len(indices))
@@ -510,7 +464,6 @@ def test_symbolic_factor_reads_the_matrix_as_its_values(path, index):
     kept = (U.indptr.copy(), U.indices.copy(), U.data.copy())
     assert np.allclose(sym.factor(U).solve(b), x)
     assert all(np.array_equal(a, k) for a, k in zip((U.indptr, U.indices, U.data), kept))
-    # one entry more in the factored part is refused
     D = (S + sp.eye(n, k=-1, format="csc")).tocsc()
     with pytest.raises(ValueError):
         sym.factor(D)
@@ -542,7 +495,6 @@ def test_every_setting_round_trips():
     assert d["relax"] == (4, 12) and d["nd_ensemble"] is True
     assert (d["panel_nb"], d["scalar_gate"], d["par_gemm"], d["par_cdiv"]) == (32, 1000, 100000, 200000)
     assert d["use_gemm_schur"] is False and d["matching"] is False
-    # an external scaling vector
     ext = rslab.Settings(scaling=np.ones(3))
     assert ext.to_dict()["scaling"] == "external"
     k = rslab.KluSettings(pivot_threshold=0.5, row_scaling=False, btf=True, matching=False, parallel=True)
@@ -558,7 +510,7 @@ def test_every_tuning_knob_round_trips():
     """Each plain Settings / KluSettings keyword is set and reported back."""
     for cls in (rslab.Settings, rslab.KluSettings):
         for key, v in cls().to_dict().items():
-            if key == "relax":  # True reports the thresholds it stands for
+            if key == "relax":
                 continue
             if isinstance(v, bool):
                 new = not v
@@ -601,7 +553,6 @@ def test_tuned_knobs_still_solve():
     assert backward_error(A, y, b) <= bound
 
 
-
 @pytest.mark.parametrize("path", ["ldlt", "lu", "klu"])
 def test_solve_transpose_on_every_handle(path):
     A = {"ldlt": _spd(300), "lu": _general(300), "klu": _circuit(300)}[path]
@@ -632,7 +583,6 @@ def test_mixed_precision_factor(path, dtype, low):
     tol = 1e-12
     xg = f.gmres(b, tol=tol).x
     assert residual_norm(A, xg, b) <= krylov_bound(A, xg, b, tol)
-    # The analysis is shared across precisions.
     sym = rslab.analyze(A, path=path)
     assert sym.factor(A, factor_dtype=low).factor_dtype == low
     with pytest.raises(ValueError):
@@ -644,8 +594,6 @@ def test_krylov_defaults_are_the_core_constants():
     import inspect
 
     ext = rslab._rslab
-    # The wrappers, and the extension functions and handle methods, whose
-    # displayed signatures spell the values out.
     funcs = [rslab.gmres, rslab.gmres_block, rslab.cocg, rslab.cocr]
     funcs += [ext.gmres_plain, ext.gmres_block_plain, ext.cocg_plain, ext.cocr_plain]
     for cls in (rslab.Ldlt, rslab.Lu, rslab.Klu, rslab.Auto):

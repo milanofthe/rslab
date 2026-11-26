@@ -15,7 +15,7 @@ from residuals import backward_error, inf_norm, krylov_bound, residual_norm, uni
 def _spd(n, seed=0):
     rng = np.random.default_rng(seed)
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng)
-    A = (A + A.T) + sp.eye(n) * (n)  # diagonally dominant -> SPD
+    A = (A + A.T) + sp.eye(n) * (n)
     return A.tocsc()
 
 
@@ -24,13 +24,11 @@ def _complex_sym(n, seed=1):
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng)
     A = A + A.T + sp.eye(n) * n
     A = A.astype(np.complex128)
-    A.data += 1j * (0.3 * A.data.real)  # keep it complex-symmetric
+    A.data += 1j * (0.3 * A.data.real)
     return A.tocsc()
 
 
 def _nearby_factor(A, eta, seed=0):
-    # The factor of a nearby matrix, every entry of A scaled by a random
-    # 1 +- eta: a weak preconditioner of A.
     P = sp.csc_matrix(A, copy=True)
     P.data = P.data * (1 + eta * np.random.default_rng(seed).uniform(-1, 1, P.nnz))
     return rslab.lu(P)
@@ -61,7 +59,7 @@ def test_lu_unsymmetric():
     rng = np.random.default_rng(2)
     n = 200
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * n
-    A = A.tocsc()  # not symmetric
+    A = A.tocsc()
     b = np.arange(n, dtype=np.float64)
     f = rslab.lu(A)
     x = f.solve(b)
@@ -87,7 +85,6 @@ def test_solve_many():
 
 @pytest.mark.parametrize("layout", ["C", "F", "strided"])
 def test_block_memory_order(layout):
-    # A block must mean the same matrix whatever its memory order.
     rng = np.random.default_rng(12)
     A = _spd(120)
     base = rng.standard_normal((120, 10))
@@ -106,7 +103,6 @@ def test_block_memory_order(layout):
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
 @pytest.mark.parametrize("index", [np.int32, np.int64])
 def test_lower_csc_matches_tril(dtype, index):
-    # The fast path for canonical input must give exactly SciPy's lower triangle.
     rng = np.random.default_rng(7)
     A = sp.random(80, 80, density=0.08, random_state=rng, format="csc").astype(dtype)
     A = (A + A.T + sp.eye(80, dtype=dtype)).tocsc()
@@ -122,7 +118,6 @@ def test_lower_csc_matches_tril(dtype, index):
 
 
 def test_lower_csc_sums_duplicates():
-    # Duplicate entries are not canonical and take the summing SciPy route.
     A = sp.csc_matrix((np.array([1.0, 2.0, 3.0, 4.0]), np.array([0, 1, 1, 1]), np.array([0, 3, 4])), shape=(2, 2))
     assert not A.has_canonical_format
     L = rslab._lower_csc(A)
@@ -130,7 +125,6 @@ def test_lower_csc_sums_duplicates():
 
 
 def test_preconditioner_refine():
-    # An indefinite-ish system where static pivoting + refinement is the recipe.
     A = _spd(200)
     b = np.ones(200)
     f = rslab.ldlt(A, preconditioner=1e-4)
@@ -139,9 +133,6 @@ def test_preconditioner_refine():
 
 
 def test_lu_gmres_block_preconditioned():
-    # The factor as preconditioner, block GMRES drives all RHS to the true
-    # solution of the full (unsymmetric) system. gmres_block now returns the full
-    # diagnostics tuple (X, converged, iters, final_res, stop).
     rng = np.random.default_rng(5)
     n = 400
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
@@ -162,7 +153,6 @@ def test_lu_gmres_block_preconditioned():
 
 
 def test_ldlt_gmres_block_complex():
-    # Complex-symmetric multi-RHS via block GMRES preconditioned by the LDL^T factor.
     A = _complex_sym(200)
     B = (np.random.default_rng(6).standard_normal((200, 4))
          + 1j * np.random.default_rng(7).standard_normal((200, 4)))
@@ -179,8 +169,6 @@ def test_ldlt_gmres_block_complex():
 
 
 def test_lu_gmres_single_rhs():
-    # Single-RHS gmres exposed on the Lu factor, returning (x, converged, iters,
-    # final_res, stop). The factor as preconditioner recovers the true solution.
     rng = np.random.default_rng(8)
     n = 300
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
@@ -199,14 +187,11 @@ def test_lu_gmres_single_rhs():
 
 
 def test_gmres_reports_non_convergence():
-    # With maxit too small to converge, the solver must return converged=False and
-    # a truthful residual rather than silently passing off a bad iterate as good.
     rng = np.random.default_rng(9)
     n = 300
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
     A = A.tocsc()
     b = rng.standard_normal(n)
-    # A single iteration cannot reach 1e-12 with the identity-ish weak setup here.
     tol = 1e-12
     x, converged, iters, final_res, stop = rslab.gmres(
         A, b, _nearby_factor(A, 0.5), tol=tol, maxit=1, restart=1
@@ -217,13 +202,8 @@ def test_gmres_reports_non_convergence():
 
 
 def test_gmres_warm_start_cuts_iterations():
-    # Warm start (issue #5): a sequence of related systems with a slowly rotating
-    # RHS. Seeding each solve with the previous solution must cut the total
-    # iteration count vs cold-starting from zero every time.
     rng = np.random.default_rng(11)
     n = 400
-    # Weakly preconditioned so each solve takes many iterations (warm start has
-    # room to help); unsymmetric operator.
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 4.0
     A = A.tocsc()
     fac = _nearby_factor(A, 0.5)
@@ -253,10 +233,6 @@ def test_gmres_warm_start_cuts_iterations():
 
 
 def _stagnating_operator(m=18, rank=3, seed=4):
-    # A convection-diffusion grid plus a global near-low-rank coupling U U^T that an
-    # weak preconditioner cannot capture - so the preconditioned system keeps a
-    # small near-invariant cluster and restarted GMRES genuinely stagnates. This is
-    # the regime GCRO-DR recycling targets.
     n = m * m
     rng = np.random.default_rng(seed)
     I = sp.eye(m)
@@ -271,9 +247,6 @@ def _stagnating_operator(m=18, rank=3, seed=4):
 
 
 def test_gmres_recycle_cross_solve_beats_warm_and_cold():
-    # GCRO-DR recycling (issue #5) across a sequence of related solves (slowly
-    # rotating RHS, weak nearby factor -> stagnation). Total iterations must
-    # order recycled < warm-start < cold, with recycled a clear margin below cold.
     A, rng = _stagnating_operator(m=18, rank=3, seed=4)
     n = A.shape[0]
     fac = _nearby_factor(A, 0.3)
@@ -316,8 +289,6 @@ def test_gmres_recycle_cross_solve_beats_warm_and_cold():
 
 
 def test_gmres_recycle_complex_handle_and_compose():
-    # End-to-end handle exercise on a complex system: the recycle dtype tracks the
-    # factor, composes with x0, refreshes across solves, and clear() empties it.
     A, rng = _stagnating_operator(m=14, rank=2, seed=6)
     A = A.astype(np.complex128)
     A.data += 1j * 0.05 * A.data.real
@@ -334,7 +305,6 @@ def test_gmres_recycle_complex_handle_and_compose():
     assert c1 and residual_norm(A, x1, b) <= krylov_bound(A, x1, b, tol)
     assert rec.active > 0, "handle not refreshed after first solve"
 
-    # Compose recycle with an x0 warm start on a related RHS.
     b2 = b * (0.99 + 0.01j)
     x2, c2, _, _, _ = rslab.gmres(A, b2, fac, tol=tol, maxit=50000, restart=10, x0=x1, recycle=rec)
     assert c2 and residual_norm(A, x2, b2) <= krylov_bound(A, x2, b2, tol)
@@ -344,21 +314,16 @@ def test_gmres_recycle_complex_handle_and_compose():
 
 
 def test_gmres_recycle_dtype_mismatch_raises():
-    # A recycle handle built from one factor's dtype cannot be used with a solve of
-    # a different dtype.
     A, rng = _stagnating_operator(m=10, rank=1, seed=1)
-    fac_r = _nearby_factor(A, 0.3)  # float64
-    fac_c = _nearby_factor(A.astype(np.complex128), 0.3)  # complex128
-    rec_c = fac_c.recycle(6)  # complex128 handle
+    fac_r = _nearby_factor(A, 0.3)
+    fac_c = _nearby_factor(A.astype(np.complex128), 0.3)
+    rec_c = fac_c.recycle(6)
     b = rng.standard_normal(A.shape[0])
     with pytest.raises(ValueError):
-        fac_r.gmres(b, recycle=rec_c)  # float64 solve, complex128 handle
+        fac_r.gmres(b, recycle=rec_c)
 
 
 def test_gmres_block_warm_start_matches_and_helps():
-    # Warm start also works for the block (multi-RHS) path: seeding with the exact
-    # solution converges immediately (0 iters), and the result still matches a
-    # cold solve.
     rng = np.random.default_rng(12)
     n = 300
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
@@ -368,7 +333,6 @@ def test_gmres_block_warm_start_matches_and_helps():
     tol = 1e-10
     X, converged, iters, _, _ = fac.gmres_block(B, tol=tol, maxit=400, restart=80)
     assert converged
-    # Re-solve warm-started from the converged solution: must need no iterations.
     X2, conv2, iters2, _, _ = fac.gmres_block(B, tol=tol, maxit=400, restart=80, x0=X)
     assert conv2
     assert iters2 == 0, f"warm start from exact solution should take 0 iters, got {iters2}"
@@ -377,13 +341,6 @@ def test_gmres_block_warm_start_matches_and_helps():
 
 
 def test_gmres_explicit_restart_is_honored():
-    # Issue #12: `restart` is the per-cycle Krylov dimension (and the up-front
-    # n*(cols)*(restart+1) basis size). It must be used verbatim, never silently
-    # replaced by the adaptive default. Cap each solve to a single cycle (maxit =
-    # restart) on a weakly-preconditioned system that needs more than a few steps:
-    # a short restart then only explores a small Krylov space and leaves a larger
-    # residual, while a long restart drives the residual far lower. Directly
-    # observable proof the value is honored, independent of the convergence rate.
     rng = np.random.default_rng(23)
     n = 300
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 4.0
@@ -391,7 +348,6 @@ def test_gmres_explicit_restart_is_honored():
     b = rng.standard_normal(n)
     fac = _nearby_factor(A, 0.5)
 
-    # One cycle each (maxit == restart), tol unreachable so neither exits early.
     _, conv_short, iters_short, res_short, _ = rslab.gmres(A, b, fac, tol=1e-14, maxit=4, restart=4)
     _, _, _, res_long, _ = rslab.gmres(A, b, fac, tol=1e-14, maxit=40, restart=40)
     assert not conv_short and iters_short == 4, "restart=4 must cap the cycle at 4 steps"
@@ -401,10 +357,6 @@ def test_gmres_explicit_restart_is_honored():
 
 
 def test_gmres_default_restart_is_adaptive():
-    # With `restart` unspecified the binding picks an adaptive default (capped so
-    # the up-front basis stays under a memory budget, clamped to [20, 80]). For a
-    # modest problem the cap is not binding, so the default still converges - and
-    # matches an explicit restart=80 on the same system.
     rng = np.random.default_rng(24)
     n = 300
     A = sp.random(n, n, density=5.0 / n, format="csc", random_state=rng) + sp.eye(n) * 10
@@ -414,24 +366,18 @@ def test_gmres_default_restart_is_adaptive():
     fac = rslab.lu(A)
 
     tol = 1e-10
-    x, conv, iters, res, _ = fac.gmres(b, tol=tol, maxit=400)  # restart defaulted
+    x, conv, iters, res, _ = fac.gmres(b, tol=tol, maxit=400)
     assert conv and residual_norm(A, x, b) <= krylov_bound(A, x, b, tol)
     xe, conve, iterse, _, _ = fac.gmres(b, tol=tol, maxit=400, restart=80)
-    assert conve and iters == iterse  # cap not binding here -> same as explicit 80
+    assert conve and iters == iterse
 
-    X, convb, _, _, _ = fac.gmres_block(B, tol=tol, maxit=400)  # block, restart defaulted
+    X, convb, _, _, _ = fac.gmres_block(B, tol=tol, maxit=400)
     assert convb
     for c in range(4):
         assert residual_norm(A, X[:, c], B[:, c]) <= krylov_bound(A, X[:, c], B[:, c], tol)
 
 
-# ---------------------------------------------------------------------------
-# KLU path
-# ---------------------------------------------------------------------------
-
-
 def _circuit(n, seed=7):
-    """Sparse, unsymmetric, column-diagonally-dominant MNA-like matrix."""
     rng = np.random.default_rng(seed)
     A = sp.random(n, n, density=4.0 / n, format="csc", random_state=rng)
     A = A - sp.diags(A.diagonal())
@@ -461,14 +407,12 @@ def test_klu_refactor_sweep():
     b = np.ones(300)
     f = rslab.klu(A)
     x0 = f.solve(b)
-    # same pattern, new values: numeric-only refactor
     A2 = A.copy()
     A2.data *= 1.7
     f.refactor(A2.data)
     x2 = f.solve(b)
     assert backward_error(A2, x2, b) <= solve_backward_error(300, U64)
     assert np.allclose(x2, x0 / 1.7)
-    # wrong length must raise, factor must recover via full refactor
     with pytest.raises(ValueError):
         f.refactor(A2.data[:-1])
 
@@ -481,11 +425,9 @@ def test_klu_solve_transpose(dtype):
     bound = solve_backward_error(300, unit_roundoff(dtype))
     x = f.solve_transpose(b)
     assert backward_error(A.T, x, b) <= bound
-    # plain transpose, not conjugate: the adjoint solve is the conjugation recipe
     if np.dtype(dtype).kind == "c":
         xh = f.solve_transpose(b.conj()).conj()
         assert backward_error(A.conj().T, xh, b) <= bound
-    # transpose solve reads refactored values
     A2 = A.copy()
     A2.data *= 1.7
     f.refactor(A2.data)
@@ -494,7 +436,6 @@ def test_klu_solve_transpose(dtype):
 
 
 def test_klu_structurally_singular_raises():
-    # empty column -> no complete matching, detected before numeric work
     A = sp.csc_matrix((np.array([1.0, 2.0]), (np.array([0, 1]), np.array([0, 1]))), shape=(3, 3))
     with pytest.raises(RuntimeError, match="structurally singular"):
         rslab.klu(A)
@@ -505,23 +446,20 @@ def test_klu_deterministic():
     b = np.linspace(-1, 1, 250)
     x1 = rslab.klu(A).solve(b)
     x2 = rslab.klu(A).solve(b)
-    assert np.array_equal(x1, x2)  # bit-identical
+    assert np.array_equal(x1, x2)
 
 
 def test_klu_parallel_bit_identical():
-    # block-diagonal-ish: two decoupled circuits -> >=2 BTF blocks, so the
-    # parallel per-block path actually has independent work to distribute
     A1, A2 = _circuit(200, seed=21), _circuit(200, seed=22)
     A = sp.block_diag([A1, A2], format="csc")
     b = np.linspace(-1, 1, 400)
     f_off = rslab.klu(A, parallel=False)
     f_on = rslab.klu(A, parallel=True)
-    f_auto = rslab.klu(A)  # None -> structural auto gate
+    f_auto = rslab.klu(A)
     assert f_off.factor_nnz == f_on.factor_nnz == f_auto.factor_nnz
     x_off, x_on, x_auto = f_off.solve(b), f_on.solve(b), f_auto.solve(b)
-    assert np.array_equal(x_off, x_on)  # bit-identical in every mode
+    assert np.array_equal(x_off, x_on)
     assert np.array_equal(x_off, x_auto)
-    # the policy is frozen into the handle and governs refactor too
     Ax = A.copy()
     Ax.data *= 1.3
     f_off.refactor(Ax.data)
@@ -536,14 +474,13 @@ def test_klu_gmres_composes():
     tol = 1e-12
     x, conv, iters, res, stop = f.gmres(b, tol=tol)
     assert conv and stop == "converged"
-    assert iters <= 2  # exact preconditioner
+    assert iters <= 2
     assert residual_norm(A, x, b) <= krylov_bound(A, x, b, tol)
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
 @pytest.mark.parametrize("row_scaling", [True, False])
 def test_klu_factors_reproduce_the_matrix(dtype, row_scaling):
-    # Two diagonal blocks coupled above the diagonal, so F is not empty.
     rng = np.random.default_rng(42)
     A1, A2 = _circuit(20, seed=1), _circuit(20, seed=2)
     cross = sp.random(20, 20, density=0.2, format="csc", random_state=rng)

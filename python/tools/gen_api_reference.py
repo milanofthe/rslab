@@ -49,7 +49,6 @@ ENTRY_SECTIONS = {"Parameters", "Returns", "Raises", "Attributes", "Yields", "Ot
 
 
 def _render_rst(doc: str) -> str:
-    """Light RST-to-Markdown: code blocks, math, roles, section underlines."""
     out = []
     lines = doc.splitlines()
     i = 0
@@ -67,15 +66,12 @@ def _render_rst(doc: str) -> str:
             code = textwrap.dedent("\n".join(block)).strip("\n")
             out.append(f"\x00FENCE\x00{lang}\n{code}\n\x00FENCE\x00")
             continue
-        # Numpydoc section headers: a title line followed by dashes.
         if i + 1 < len(lines) and lines[i + 1].strip() and set(lines[i + 1].strip()) == {"-"} and stripped:
             section = stripped
             out.append(f"**{stripped}**")
             out.append("")
             i += 2
             continue
-        # Entries of a parameter-style section: "name : type" (or a bare
-        # type for Returns / Raises) at column 0, indented description below.
         if section in ENTRY_SECTIONS and stripped and not line.startswith(" ") and not stripped.startswith("."):
             name, sep, typ = stripped.partition(" : ")
             out.append(f"- `{name}` ({typ}):" if sep else f"- `{name}`:")
