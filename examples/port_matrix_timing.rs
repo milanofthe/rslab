@@ -23,9 +23,6 @@ use std::time::Instant;
 
 type C = Complex<f64>;
 
-/// `p` ports of six unknowns each, weight 1/6, starting at pseudo-random
-/// unknowns in `first..first + span`; `next(i, k)` is the `k`-th unknown of
-/// the port at `i`.
 fn ports(
     n: usize,
     p: usize,
@@ -44,8 +41,7 @@ fn ports(
     SparseRhs::from_columns(n, &cols).unwrap()
 }
 
-/// Median, minimum and maximum seconds over `reps` runs after a warm-up.
-fn time<R>(reps: usize, mut f: impl FnMut() -> R) -> ([f64; 3], R) {
+fn median_min_max<R>(reps: usize, mut f: impl FnMut() -> R) -> ([f64; 3], R) {
     let mut out = f();
     let mut runs = Vec::with_capacity(reps);
     for _ in 0..reps.max(1) {
@@ -74,8 +70,6 @@ fn main() {
     let p = arg(3, 200);
     let threads = arg(4, 1);
     let reps = arg(5, 5);
-    // `scattered` (default): ports anywhere; `clustered`: all ports start in
-    // a window of n/100 unknowns in the middle of the numbering.
     let clustered = args.get(6).is_some_and(|s| s == "clustered");
     let window = |n: usize| if clustered { (n / 2, n / 100) } else { (0, n) };
     let (a, b) = match case {
@@ -104,18 +98,16 @@ fn main() {
         f.factor_nnz(),
         t.elapsed().as_secs_f64()
     );
-    let (tz, z) = time(reps, || f.port_matrix(&b).unwrap());
-    // `PORT_ONLY=1`: the port matrix alone (for the process's peak memory).
+    let (tz, z) = median_min_max(reps, || f.port_matrix(&b).unwrap());
     if std::env::var_os("PORT_ONLY").is_some() {
         println!("port_matrix {}", show(tz));
         return;
     }
     let dense = b.to_dense();
-    let (td, zd) = time(reps, || {
+    let (td, zd) = median_min_max(reps, || {
         let x = f.solve_many(&dense, p).unwrap();
         b.transpose_times(&x, p).unwrap()
     });
-    // Optional: the bits of `Z` to a file, to compare builds.
     if let Some(path) = args.get(7) {
         let bytes: Vec<u8> = z
             .iter()

@@ -38,7 +38,6 @@ fn median(mut v: Vec<f64>) -> f64 {
     }
 }
 
-/// `apply_block` of `nr` columns `reps` times after one warm-up, in ms.
 fn times(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) -> Vec<f64> {
     let n = b.len() / nr;
     s.apply_block(b, x, nr, n).unwrap();
@@ -51,8 +50,6 @@ fn times(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize) -> Vec<f
         .collect()
 }
 
-/// One traced round of `reps` applies in a context at TRACE, its record written to
-/// `dir/nrhs<nr>.json`.
 fn trace(s: &LuSolver<C>, b: &[C], x: &mut [C], nr: usize, reps: usize, dir: &str) {
     let n = b.len() / nr;
     let ctx = rsprobe::Context::builder()
@@ -92,7 +89,6 @@ fn main() {
         .with_delayed_pivots(delayed)
         .with_matching(delayed)
         .with_ordering(OrderingMethod::MetisND)
-        // the pool it runs on (RAYON_NUM_THREADS), as a host that lends its workers does
         .with_threads(Threads::Ambient);
     if let Ok(r) = std::env::var("RSLAB_RELAX") {
         let v: Vec<usize> = r.split(',').map(|x| x.parse().unwrap()).collect();
@@ -132,7 +128,6 @@ fn main() {
     for nrhs in counts {
         let bb: Vec<C> = (0..n * nrhs).map(rhs).collect();
         if copies > 0 {
-            // every thread its own factor, its applies on its own thread
             let start = std::sync::Barrier::new(copies);
             let per: Vec<f64> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..copies)
@@ -166,13 +161,12 @@ fn main() {
             .map(|(a, b)| (a - b).norm())
             .fold(0.0, f64::max)
             / scale;
-        // FNV-1a of the solution's bits, to compare builds and thread counts
-        let bits = (x.iter().flat_map(|v| [v.re.to_bits(), v.im.to_bits()]))
+        let fnv1a_bits = (x.iter().flat_map(|v| [v.re.to_bits(), v.im.to_bits()]))
             .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
                 (h ^ b).wrapping_mul(0x100_0000_01b3)
             });
         println!(
-            "nrhs={nrhs:2}: {med:7.2} ms median, {best:7.2} ms best, {:6.2} ms per column, {:5.1} GB/s of factor, column 0 against the single solve {dev:.1e}, bits {bits:016x}",
+            "nrhs={nrhs:2}: {med:7.2} ms median, {best:7.2} ms best, {:6.2} ms per column, {:5.1} GB/s of factor, column 0 against the single solve {dev:.1e}, bits {fnv1a_bits:016x}",
             med / nrhs as f64,
             s.factor_nnz() as f64 * 16.0 / med / 1e6,
         );

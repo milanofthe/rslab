@@ -23,21 +23,15 @@ use std::time::Instant;
 
 type C = Complex<f64>;
 
-/// Refinement steps of the refined solve.
 const REFINE_STEPS: usize = 2;
-/// Right-hand sides of the block solve.
-const BLOCK: usize = 8;
-/// Entries per column of the BEM near field, about.
-const NEAR_PER_COL: f64 = 60.0;
-/// The largest near-field cutoff (the sphere's diameter is 2).
+const BLOCK_RHS: usize = 8;
+const NEAR_ENTRIES_PER_COL: f64 = 60.0;
 const NEAR_MAX_CUTOFF: f64 = 1.2;
 
-/// The phases' wall times of one run, ms.
 #[derive(Default)]
 struct Times(Vec<(&'static str, Vec<f64>)>);
 
 impl Times {
-    /// `f()`, its wall time added to phase `name` when `keep`.
     fn time<R>(&mut self, keep: bool, name: &'static str, f: impl FnOnce() -> R) -> R {
         let t = Instant::now();
         let r = f();
@@ -64,8 +58,7 @@ impl Times {
     }
 }
 
-/// FNV-1a of the bits of `x`.
-fn bits<T: Scalar>(x: &[T]) -> u64 {
+fn fnv1a_bits<T: Scalar>(x: &[T]) -> u64 {
     let words = x
         .iter()
         .flat_map(|v| [v.real().to_bits(), v.imag().to_bits()]);
@@ -74,15 +67,12 @@ fn bits<T: Scalar>(x: &[T]) -> u64 {
     })
 }
 
-/// The right-hand sides: `nrhs` columns of `n`.
 fn rhs<T: Scalar>(n: usize, nrhs: usize) -> Vec<T> {
     (0..n * nrhs)
         .map(|k| T::from_real(((k * 7) % 13) as f64 - 6.0))
         .collect()
 }
 
-/// Every phase of a supernodal solver `$sym` on `$a`, `reps` times after a
-/// warm-up, the timed runs under `$ctx`.
 macro_rules! supernodal {
     ($sym:ty, $a:expr, $opts:expr, $reps:expr, $ctx:expr) => {{
         let (a, opts) = (&$a, &$opts);
@@ -93,14 +83,14 @@ macro_rules! supernodal {
             let sym = times.time(keep, "analyze", || <$sym>::analyze(a, opts).unwrap());
             let mut f = times.time(keep, "factor", || sym.factor(a, opts).unwrap());
             times.time(keep, "refactor", || sym.refactor(a, opts, &mut f).unwrap());
-            let b = rhs(a.n, BLOCK);
+            let b = rhs(a.n, BLOCK_RHS);
             let x = times.time(keep, "solve", || f.solve(&b[..a.n]).unwrap());
-            times.time(keep, "solve8", || f.solve_many(&b, BLOCK).unwrap());
+            times.time(keep, "solve8", || f.solve_many(&b, BLOCK_RHS).unwrap());
             let policy = RefinePolicy::steps(REFINE_STEPS);
             times.time(keep, "refine", || {
                 f.solve_refined(a, &b[..a.n], &policy).unwrap()
             });
-            hash = bits(&x);
+            hash = fnv1a_bits(&x);
         }
         (times, hash)
     }};
@@ -138,7 +128,7 @@ fn main() {
             (supernodal!(LuSymbolic, a, opts, reps, ctx), n, nnz)
         }
         "mom" => {
-            let cutoff = (2.0 * (NEAR_PER_COL / size as f64).sqrt()).min(NEAR_MAX_CUTOFF);
+            let cutoff = (2.0 * (NEAR_ENTRIES_PER_COL / size as f64).sqrt()).min(NEAR_MAX_CUTOFF);
             let bem = bem::BemOpts {
                 cutoff,
                 ..Default::default()
@@ -159,14 +149,14 @@ fn main() {
                 let sym = times.time(keep, "analyze", || KluSymbolic::analyze(&a, &s).unwrap());
                 let mut k = times.time(keep, "factor", || sym.factor(&a, &s).unwrap());
                 times.time(keep, "refactor", || k.refactor(&a).unwrap());
-                let b = rhs(n, BLOCK);
+                let b = rhs(n, BLOCK_RHS);
                 let x = times.time(keep, "solve", || k.solve(&b[..n]).unwrap());
-                times.time(keep, "solve8", || k.solve_many(&b, BLOCK).unwrap());
+                times.time(keep, "solve8", || k.solve_many(&b, BLOCK_RHS).unwrap());
                 let policy = RefinePolicy::steps(REFINE_STEPS);
                 times.time(keep, "refine", || {
                     k.solve_refined(&a, &b[..n], &policy).unwrap()
                 });
-                hash = bits(&x);
+                hash = fnv1a_bits(&x);
             }
             ((times, hash), n, nnz)
         }

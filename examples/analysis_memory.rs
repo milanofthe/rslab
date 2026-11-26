@@ -56,20 +56,16 @@ static COUNTING: rsprobe::Alloc<Counting> = rsprobe::Alloc::wrap(Counting);
 
 const GB: f64 = (1u64 << 30) as f64;
 
-/// The live heap before the analysis: the input matrix.
-static BASE: AtomicUsize = AtomicUsize::new(0);
+static INPUT_HEAP: AtomicUsize = AtomicUsize::new(0);
 
-/// Restart the peak at the live heap; the peak and live heap above the
-/// input before the restart, in GB.
-fn mark() -> (f64, f64) {
-    let base = BASE.load(Relaxed);
+fn restart_peak() -> (f64, f64) {
+    let base = INPUT_HEAP.load(Relaxed);
     let live = LIVE.load(Relaxed);
     let peak = PEAK.swap(live, Relaxed);
     let above = |b: usize| b.saturating_sub(base) as f64 / GB;
     (above(peak), above(live))
 }
 
-/// `VmHWM` / `VmRSS` of the process in GB (Linux; 0 elsewhere).
 fn rss(key: &str) -> f64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -81,7 +77,6 @@ fn rss(key: &str) -> f64 {
         .map_or(0.0, |kb| kb * 1024.0 / GB)
 }
 
-/// FNV-1a over the words of the analysis's result.
 fn fingerprint(s: &LuSymbolic) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |x: u64| {
@@ -123,8 +118,8 @@ fn main() {
         .with_ordering(ordering)
         .with_threads(Threads::Fixed(threads));
 
-    BASE.store(LIVE.load(Relaxed), Relaxed);
-    mark();
+    INPUT_HEAP.store(LIVE.load(Relaxed), Relaxed);
+    restart_peak();
     let ctx = rsprobe::Context::builder()
         .threshold(rsprobe::Level::DEBUG)
         .build();
@@ -140,7 +135,7 @@ fn main() {
     if let Some(path) = std::env::var_os("RSPROBE_RECORD") {
         std::fs::write(path, ctx.record().to_string()).expect("writing the record");
     }
-    let (peak, held) = mark();
+    let (peak, held) = restart_peak();
     println!(
         "analysis {ms:.0} ms (recorded), peak {peak:.2} GB, holds {held:.2} GB (heap_bytes {:.2} GB), \
          VmHWM {:.2} GB, VmRSS {:.2} GB, fingerprint {:016x}",
@@ -151,15 +146,14 @@ fn main() {
     );
     drop(s);
 
-    // The whole analysis' peak, with the records off.
-    BASE.store(LIVE.load(Relaxed), Relaxed);
-    mark();
+    INPUT_HEAP.store(LIVE.load(Relaxed), Relaxed);
+    restart_peak();
     let mut times = Vec::new();
     for r in 0..reps {
         let t = Instant::now();
         let s = LuSymbolic::analyze(&a, &opts).unwrap();
         times.push(t.elapsed().as_secs_f64() * 1e3);
-        let (peak, _) = mark();
+        let (peak, _) = restart_peak();
         println!(
             "rep {r}: {:.0} ms, peak {peak:.2} GB above the input, fingerprint {:016x}",
             times[r],
