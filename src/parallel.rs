@@ -296,6 +296,52 @@ pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+pub(crate) struct FreeTestPool {
+    threads: usize,
+    widest: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl FreeTestPool {
+    pub(crate) fn new(threads: usize) -> Self {
+        FreeTestPool {
+            threads,
+            widest: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn widest(&self) -> usize {
+        self.widest.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl Pool for FreeTestPool {
+    fn threads(&self) -> usize {
+        self.threads
+    }
+    fn dispatch(&self) -> Dispatch {
+        Dispatch::free(self.threads)
+    }
+    fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.widest.fetch_max(n, Relaxed);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..self.threads.min(n) {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    f(i);
+                });
+            }
+        });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

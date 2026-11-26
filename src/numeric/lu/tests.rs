@@ -1269,7 +1269,9 @@ fn forked_update_on_unsymmetric_structures() {
 #[test]
 fn row_passes_give_the_same_bits_serial_and_parallel() {
     use super::node::{deep_scale, deep_update};
-    let (rows, cols) = (1usize << 16, 16usize);
+    use crate::parallel::{install, FreeTestPool, Pool};
+    let run = crate::constants::LU_DEEP_ROWS;
+    let (rows, cols) = (3 * run + run / 2, 16usize);
     let mut seed = 7u64;
     let mut rnd = move || {
         seed ^= seed << 13;
@@ -1282,12 +1284,25 @@ fn row_passes_give_the_same_bits_serial_and_parallel() {
     let u: Vec<f64> = (kb..cols).map(|_| rnd()).collect();
     let mut serial: Vec<f64> = (0..rows).map(|_| rnd()).collect();
     let mut parallel = serial.clone();
-    let top_serial = deep_update(&lrect, rows, kb, &u, &mut serial, true, false);
-    let top_parallel = deep_update(&lrect, rows, kb, &u, &mut parallel, true, true);
-    assert_eq!(top_serial.to_bits(), top_parallel.to_bits());
     let pinv = rnd();
+    let wide = |f: &mut dyn FnMut()| {
+        let pool = std::sync::Arc::new(FreeTestPool::new(4));
+        install(pool.clone() as std::sync::Arc<dyn Pool>, f);
+        pool.widest()
+    };
+    let top_serial = deep_update(&lrect, rows, kb, &u, &mut serial, true, false);
+    let mut top_parallel = 0.0;
+    let threads =
+        wide(&mut || top_parallel = deep_update(&lrect, rows, kb, &u, &mut parallel, true, true));
+    assert!(threads > 1, "the update ran on {threads} threads");
+    assert_eq!(top_serial.to_bits(), top_parallel.to_bits());
+    assert!(serial
+        .iter()
+        .zip(&parallel)
+        .all(|(p, q)| p.to_bits() == q.to_bits()));
     deep_scale(&mut serial, pinv, false);
-    deep_scale(&mut parallel, pinv, true);
+    let threads = wide(&mut || deep_scale(&mut parallel, pinv, true));
+    assert!(threads > 1, "the scale ran on {threads} threads");
     assert!(serial
         .iter()
         .zip(&parallel)

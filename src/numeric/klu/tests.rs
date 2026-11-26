@@ -419,31 +419,6 @@ fn klu_estimate_bounds_the_symbolic_fill() {
     assert_eq!(s.estimated_flops(), 2 * (n as u64 - 1));
 }
 
-struct Threaded(usize);
-
-impl crate::parallel::Pool for Threaded {
-    fn threads(&self) -> usize {
-        self.0
-    }
-    fn dispatch(&self) -> crate::parallel::Dispatch {
-        crate::parallel::Dispatch::free(self.0)
-    }
-    fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|s| {
-            for _ in 0..self.0.min(n) {
-                s.spawn(|| loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    f(i);
-                });
-            }
-        });
-    }
-}
-
 #[test]
 fn klu_parallel_replays_are_bit_identical_to_sequential() {
     let (a, b) = grid_cd(32);
@@ -478,7 +453,8 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
         );
         assert_eq!(s_seq.factors.udiag, s.factors.udiag, "{what}: diag differs");
     };
-    let lent: std::sync::Arc<dyn crate::parallel::Pool> = std::sync::Arc::new(Threaded(4));
+    let lent: std::sync::Arc<dyn crate::parallel::Pool> =
+        std::sync::Arc::new(crate::parallel::FreeTestPool::new(4));
     crate::parallel::install(lent.clone(), || s_par.refactor(&a2)).unwrap();
     assert_ne!(
         s_par.factors.modes[..],
@@ -836,7 +812,7 @@ impl crate::parallel::Pool for Costed {
         self.1.clone()
     }
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        crate::parallel::Pool::run(&Threaded(self.0), n, f)
+        crate::parallel::Pool::run(&crate::parallel::FreeTestPool::new(self.0), n, f)
     }
 }
 
