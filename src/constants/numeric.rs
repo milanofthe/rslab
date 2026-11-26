@@ -5,11 +5,13 @@
 //! convergence, and the outer GMRES residual test stays authoritative; for
 //! [`crate::dense`] a QR that does not converge within the budget is an error.
 
-/// A positive floor for magnitudes that are divided by or compared
-/// relatively, so a zero never divides (1).
+/// A positive floor for magnitudes that are divided by, compared
+/// relatively or taken the logarithm of, so a zero never divides and no
+/// logarithm is infinite (1).
 /// Used by: `dense_eig::qr_iterate` (deflation test), `dense_eig::Schur`'s
 /// eigenvectors (the floor of a back substitution's denominator),
-/// `krylov::recycle::combine_ritz_real` (Ritz value magnitude).
+/// `krylov::recycle::combine_ritz_real` (Ritz value magnitude),
+/// `matgen::Rng::normal` (the uniform sample under the Box-Muller logarithm).
 /// Why: far below any meaningful magnitude, far above the subnormals.
 /// Contract: results (only where a magnitude would be zero).
 pub const TINY: f64 = 1e-300;

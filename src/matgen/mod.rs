@@ -83,7 +83,7 @@ impl Rng {
     /// Standard normal via Box-Muller (one of the pair).
     #[inline]
     pub fn normal(&mut self) -> f64 {
-        let u1 = (self.unit()).max(1e-300);
+        let u1 = (self.unit()).max(crate::constants::TINY);
         let u2 = self.unit();
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
