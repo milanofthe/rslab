@@ -17,8 +17,7 @@
 //!   its thread (run with `RAYON_NUM_THREADS=1`), against the factor's memory bandwidth;
 //! - `RSLAB_RELAX=width,rows`: a relaxed amalgamation, `RSLAB_NEMIN` the amalgamation's
 //!   width;
-//! - `RSLAB_LEAF=k`: `SolveSettings::leaf_subtrees`, `RSLAB_GEMM_TASK=k`:
-//!   `SolveSettings::gemm_task`.
+//! - `RSLAB_LEAF=k`: `SolveSettings::leaf_subtrees`.
 use num_complex::Complex;
 use rslab::{LuSolver, OrderingMethod, Preconditioner, SolverSettings, Threads, ZeroPivotAction};
 use std::time::Instant;
@@ -108,19 +107,15 @@ fn main() {
     if let Some(k) = env("RSLAB_LEAF") {
         opts.solve.leaf_subtrees = k;
     }
-    if let Some(k) = env("RSLAB_GEMM_TASK") {
-        opts.solve.gemm_task = k;
-    }
     let traced = std::env::var("RSLAB_TRACE").ok();
     let t = Instant::now();
     let s = LuSolver::factor(&a, &opts).unwrap();
     let factor_s = t.elapsed().as_secs_f64();
     println!(
-        "n={n} fill={} factor {factor_s:.2} s threads={} delayed={delayed} leaf_subtrees={} gemm_task={}",
+        "n={n} fill={} factor {factor_s:.2} s threads={} delayed={delayed} leaf_subtrees={}",
         s.factor_nnz(),
         rayon::current_num_threads(),
         opts.solve.leaf_subtrees,
-        opts.solve.gemm_task
     );
     let rhs = |k: usize| C::new(((k * 7) % 13) as f64 - 6.0, ((k * 3) % 5) as f64 - 2.0);
     let single: Vec<C> = (0..n).map(rhs).collect();

@@ -233,8 +233,9 @@ fn check(n: usize, len: usize, nrhs: usize) -> Result<(), RslabError> {
     Ok(())
 }
 
-/// What a permuted, scaled copy costs per entry.
-static PERMUTE_RATE: crate::parallel::Rate =
+/// What a permuted, scaled copy costs per entry (the backward sweeps' gather of
+/// a node's rows below too).
+pub(crate) static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SCAN_NS_PER_ENTRY);
 
 /// The block a solve's sweeps take, row-major (`y[e * nrhs + c]`), from the

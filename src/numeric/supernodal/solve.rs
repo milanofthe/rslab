@@ -53,6 +53,41 @@ const NONE: u32 = u32::MAX;
 /// added, so no accumulator is zeroed.
 const FIRST: u32 = !(u32::MAX >> 1);
 
+/// What a multiply-add of a node's products in the sweeps costs: a product is
+/// cut into as many pieces as its work is worth ([`SolvePlan::cut`]).
+static PRODUCT_RATE: crate::parallel::ScalarRates =
+    crate::parallel::ScalarRates::new(crate::constants::GEMM_NS_PER_FLOP);
+
+/// The pieces of a node's product ([`SolvePlan::cut`]): `rows` row chunks by
+/// `cols` groups of right-hand sides, piece `i` the row chunk `i / cols` of the
+/// group `i % cols` ([`Cut::piece`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Cut {
+    rows: usize,
+    cols: usize,
+}
+
+impl Cut {
+    /// The pieces.
+    fn len(&self) -> usize {
+        self.rows * self.cols
+    }
+
+    /// The rows and the right-hand sides of piece `i` of a product of `rows`
+    /// rows and `nr` right-hand sides.
+    fn piece(
+        &self,
+        i: usize,
+        rows: usize,
+        nr: usize,
+    ) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        (
+            chunk_rows(i / self.cols, self.rows, rows, nr),
+            col_groups(i % self.cols, self.cols, nr),
+        )
+    }
+}
+
 mod dag;
 mod sparse;
 pub use sparse::SparseReach;
@@ -925,22 +960,37 @@ impl<T: Scalar> SolvePlan<T> {
         chain
     }
 
-    /// The row chunks a node's product of `rows` rows and depth `depth` for `nr`
-    /// right-hand sides runs in on the pool (`par`, the node an ancestor): about
-    /// [`SolveSettings::gemm_task`](crate::SolveSettings::gemm_task) entries times
-    /// right-hand sides each, at least [`chunk_align`] rows each and cut at its
-    /// multiples ([`chunk_rows`]). One, the whole product, on the calling thread;
-    /// none for no rows. Within a call the GEMM blocks a product's depth alike
-    /// for any row count (depth up to 64 here in the forward sweep, row counts
-    /// up to 64 in the backward one), so a row's sums are the same in a chunk as
-    /// in the whole product, and a node's are the same on one thread as on many.
-    fn node_chunks(&self, par: bool, rows: usize, depth: usize, nr: usize) -> usize {
-        let whole = usize::from(rows > 0);
-        if !par {
-            return whole;
+    /// The pieces a node's product of `rows` rows and depth `depth` for `nr`
+    /// right-hand sides runs in on the pool (`par`, the node an ancestor): as many
+    /// as its multiply-adds are worth on the pool ([`PRODUCT_RATE`] against the
+    /// section cost, [`crate::parallel::width`]), of row chunks (at least
+    /// [`chunk_align`] rows each, [`chunk_rows`]) and groups of right-hand sides
+    /// (whole register tiles, [`col_groups`]). Each row chunk reads the product's
+    /// `depth x nr` operand of right-hand sides whole and each column group its
+    /// `rows x depth` factor part, so the pieces are shaped to read the least of
+    /// both: about `sqrt(p rows / nr)` row chunks by `sqrt(p nr / rows)` column
+    /// groups for `p` pieces. One piece, the whole product, on the calling
+    /// thread; none for no rows. The GEMM blocks a product's depth by the depth
+    /// alone and sums every entry of the result alike wherever it lies, so an
+    /// entry's sums are the same in a piece as in the whole product, and a node's
+    /// are the same on one thread as on many.
+    fn cut(&self, par: bool, rows: usize, depth: usize, nr: usize) -> Cut {
+        if rows == 0 {
+            return Cut { rows: 0, cols: 1 };
         }
-        let by_work = (rows * depth * nr).div_ceil(self.cfg.gemm_task.max(1));
-        by_work.min(rows / chunk_align(nr)).max(whole)
+        if !par {
+            return Cut { rows: 1, cols: 1 };
+        }
+        let most_rows = (rows / chunk_align(nr)).max(1);
+        let most_cols = (nr / SOLVE_RHS_TILE).max(1);
+        let work = crate::parallel::Work::of((rows * depth * nr) as f64, PRODUCT_RATE.of::<T>());
+        let p = crate::parallel::width(work.time(), most_rows * most_cols).max(1);
+        let cols = ((p * nr) as f64 / rows as f64).sqrt().round() as usize;
+        let cols = cols.clamp(1, most_cols.min(p));
+        Cut {
+            rows: p.div_ceil(cols).min(most_rows),
+            cols,
+        }
     }
 
     #[inline]
@@ -1182,14 +1232,14 @@ impl<T: Scalar> SolvePlan<T> {
 
     /// The node part of [`fwd_node_gemm`](Self::fwd_node_gemm), shared with
     /// the reach-limited sweep of sparse right-hand sides, block by block of
-    /// the panel ([`Layout`]): each block's triangle on the
-    /// register tiles on the node's own rows `yb` (`nr` wide), then the node's
-    /// own rows below it take its columns in one product; once the triangle is
-    /// solved, `L_off X` into `t[..m * nr]` (left untouched when the node has
-    /// no off-block rows), each row the blocks' products summed in block order,
-    /// in one section of row chunks across all blocks. The products run in row
-    /// chunks on the pool when `par` ([`node_chunks`](Self::node_chunks)). The
-    /// caller takes `t` off the rows the node's off-block rows map to.
+    /// the panel ([`Layout`]): each block's triangle ([`tri_rows`]) on the
+    /// node's own rows `yb` (`nr` wide), then the node's own rows below it take
+    /// its columns in one product; once the triangle is solved, `L_off X` into
+    /// `t[..m * nr]` (left untouched when the node has no off-block rows), each
+    /// row the blocks' products summed in block order, in one section of pieces
+    /// across all blocks. The products run in pieces on the pool when `par`
+    /// ([`cut`](Self::cut)). The caller takes `t` off the rows the node's
+    /// off-block rows map to.
     pub(super) fn fwd_node_core(&self, s: u32, nr: usize, yb: &mut [T], par: bool, t: &mut Vec<T>) {
         let (c0, w, _, m, _, panel) = self.node(s);
         let lay = Layout::new(w, m);
@@ -1211,11 +1261,11 @@ impl<T: Scalar> SolvePlan<T> {
             }
             // the node's own rows `je..w` take the block's columns
             let k = je - jb;
-            let own = self.node_chunks(par, w - je, k, nr);
+            let own = self.cut(par, w - je, k, nr);
             let yp = Shared(yb.as_mut_ptr(), yb.len());
-            run_chunks(own, |i| {
-                let r = chunk_rows(i, own, w - je, nr);
-                // SAFETY: a chunk writes its own rows of `yb` (below `je`); the
+            run_chunks(own.len(), |i| {
+                let (r, c) = own.piece(i, w - je, nr);
+                // SAFETY: a piece writes its own entries of `yb` (below `je`); the
                 // block's solved rows `jb..je` and the panel are only read.
                 unsafe {
                     fwd_own(
@@ -1225,6 +1275,7 @@ impl<T: Scalar> SolvePlan<T> {
                         jb,
                         je,
                         je + r.start..je + r.end,
+                        c,
                         nr,
                     )
                 }
@@ -1235,16 +1286,16 @@ impl<T: Scalar> SolvePlan<T> {
         }
         // the first block's product overwrites every entry of `t`
         grow(t, m * nr);
-        let below = self.node_chunks(par, m, w, nr);
+        let below = self.cut(par, m, w, nr);
         let (yp, tp) = (
             Shared(yb.as_mut_ptr(), yb.len()),
             Shared(t.as_mut_ptr(), t.len()),
         );
-        run_chunks(below, |i| {
-            let r = chunk_rows(i, below, m, nr);
+        run_chunks(below.len(), |i| {
+            let (r, c) = below.piece(i, m, nr);
             for (b, (jb, je, _, _)) in lay.blocks().enumerate() {
-                // SAFETY: a chunk writes its own rows of `t`; the solved rows of `yb`
-                // and the panel are only read.
+                // SAFETY: a piece writes its own entries of `t`; the solved rows of
+                // `yb` and the panel are only read.
                 unsafe {
                     fwd_below(
                         tp.ptr(),
@@ -1254,6 +1305,7 @@ impl<T: Scalar> SolvePlan<T> {
                         je,
                         yp.ptr(),
                         r.clone(),
+                        c.clone(),
                         nr,
                         b > 0,
                     )
@@ -1267,9 +1319,8 @@ impl<T: Scalar> SolvePlan<T> {
     /// the final values of the rows below the node gathered and taken off the
     /// node's rows as one product `L_off^T G`, then the triangle from the last
     /// block up: each block takes off the rows below it in the node by one
-    /// product and solves its own triangle column by column, last to first, each
-    /// column scaled after its terms. The products run in row chunks on the
-    /// pool when `par` ([`node_chunks`](Self::node_chunks)), within a block's rows.
+    /// product and solves its own triangle ([`tri_up`]). The products run in
+    /// pieces on the pool when `par` ([`cut`](Self::cut)), within a block's rows.
     fn bwd_node_gemm(&self, s: u32, nr: usize, x: &mut [T], par: bool, g: &mut Vec<T>) {
         let (c0, w, r0, m, _, panel) = self.node(s);
         let lay = Layout::new(w, m);
@@ -1289,23 +1340,23 @@ impl<T: Scalar> SolvePlan<T> {
         );
         if m > 0 {
             // the node's rows `X[i] -= sum_r L[r, i] G[r]`, each block's rows in its
-            // chunks: every full block cut alike, the last one by its own rows
+            // pieces: every full block cut alike, the last one by its own rows
             let nb = w.div_ceil(PANEL_BLOCK);
             let last_rows = w - (nb - 1) * PANEL_BLOCK;
             let (full, last) = (
-                self.node_chunks(par, PANEL_BLOCK, m, nr),
-                self.node_chunks(par, last_rows, m, nr),
+                self.cut(par, PANEL_BLOCK, m, nr),
+                self.cut(par, last_rows, m, nr),
             );
-            run_chunks((nb - 1) * full + last, |i| {
-                let (b, q, count) = match i.checked_sub((nb - 1) * full) {
-                    None => (i / full, i % full, full),
+            run_chunks((nb - 1) * full.len() + last.len(), |i| {
+                let (b, q, cut) = match i.checked_sub((nb - 1) * full.len()) {
+                    None => (i / full.len(), i % full.len(), full),
                     Some(q) => (nb - 1, q, last),
                 };
                 let Some((jb, je, _, _)) = lay.blocks().nth(b) else {
                     return;
                 };
-                let r = chunk_rows(q, count, je - jb, nr);
-                // SAFETY: the chunk writes its own rows of the node; the panel and
+                let (r, c) = cut.piece(q, je - jb, nr);
+                // SAFETY: the piece writes its own entries of the node; the panel and
                 // the gathered rows are only read.
                 unsafe {
                     bwd_off(
@@ -1314,6 +1365,7 @@ impl<T: Scalar> SolvePlan<T> {
                         m,
                         gp.ptr(),
                         jb + r.start..jb + r.end,
+                        c,
                         nr,
                     )
                 }
@@ -1321,10 +1373,10 @@ impl<T: Scalar> SolvePlan<T> {
         }
         for (jb, je, off, ld) in lay.blocks().rev() {
             if je < w {
-                let count = self.node_chunks(par, je - jb, w - je, nr);
-                run_chunks(count, |q| {
-                    let r = chunk_rows(q, count, je - jb, nr);
-                    // SAFETY: the chunk writes its own rows of `jb..je`, rows `je..w`
+                let cut = self.cut(par, je - jb, w - je, nr);
+                run_chunks(cut.len(), |q| {
+                    let (r, c) = cut.piece(q, je - jb, nr);
+                    // SAFETY: the piece writes its own entries of `jb..je`, rows `je..w`
                     // are read: disjoint.
                     unsafe {
                         bwd_in(
@@ -1335,6 +1387,7 @@ impl<T: Scalar> SolvePlan<T> {
                             jb,
                             je,
                             jb + r.start..jb + r.end,
+                            c,
                             nr,
                         )
                     }
@@ -1451,13 +1504,16 @@ fn add_assign<T: Scalar>(y: &mut [T], x: &[T]) {
 }
 
 /// The unit-lower triangle of the columns `jb..je` (scaled by `diag_inv` where it is given,
-/// the `U^T` of an LU) on the row-major right-hand sides `v` (`nr` wide), ROW by row: row
-/// `i` takes `- l_ik v_k` for `k` ascending from `jb`, then its scale. That is the very
-/// sequence of operations the column-oriented sweep applies to it (column `k` subtracts its
-/// multiple from every later row, in ascending `k`), so the result is the same to the bit;
-/// the row form keeps a tile of [`TILE_ROWS`] rows by up to four right-hand sides in
-/// registers across all columns above it, where the column form read and wrote a row of
-/// `nr` values per entry.
+/// the `U^T` of an LU) on the row-major right-hand sides `v` (`nr` wide), `panel` the
+/// column-major block from its first row and column (`ld`, entry `(i, k)` at `k * ld + i`).
+/// Blocked by halves: the first half's triangle, the second half's rows take the first
+/// half's solved rows in one product ([`fwd_own`]), then the second half's triangle; a
+/// half of at most [`TILE_ROWS`] rows is solved on the register tiles ([`tri_tile`]). All
+/// but the triangles of [`TILE_ROWS`] rows on the diagonal runs in the GEMM, which keeps
+/// its operands in registers across the right-hand sides where a register tile of rows
+/// re-read the block once per tile of right-hand sides. Row `i` takes the halves' products
+/// in column order, then its scale; the halves are cut by the block alone, so its sums are
+/// the same on every thread count.
 fn tri_rows<T: Scalar>(
     v: &mut [T],
     panel: &[T],
@@ -1467,6 +1523,26 @@ fn tri_rows<T: Scalar>(
     jb: usize,
     je: usize,
 ) {
+    if je - jb > TILE_ROWS {
+        let h = jb + ((je - jb) / 2).next_multiple_of(TILE_ROWS);
+        tri_rows(v, panel, diag_inv, ld, nr, jb, h);
+        debug_assert!(v.len() >= je * nr && panel.len() >= (h - 1) * ld + je);
+        // SAFETY: rows `h..je` of `v` are written, rows `jb..h` and the block's rows
+        // `h..je` of the columns `jb..h` read: disjoint, and inside `v` and `panel`.
+        unsafe {
+            fwd_own(
+                v.as_mut_ptr(),
+                panel.as_ptr().add(jb * ld + jb),
+                ld,
+                jb,
+                h,
+                h..je,
+                0..nr,
+                nr,
+            )
+        };
+        return tri_rows(v, panel, diag_inv, ld, nr, h, je);
+    }
     let mut c0 = 0;
     while c0 < nr {
         let w = (nr - c0).min(SOLVE_RHS_TILE);
@@ -1480,7 +1556,9 @@ fn tri_rows<T: Scalar>(
     }
 }
 
-/// [`tri_rows`] for the right-hand sides `c0..c0 + W`.
+/// The unit-lower triangle of the rows `jb..je` (at most [`TILE_ROWS`]) for the
+/// right-hand sides `c0..c0 + W` ([`tri_rows`]), in registers, row by row: row `i` takes
+/// `- l_ik v_k` for `k` ascending from `jb`, then its scale.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn tri_tile<T: Scalar, const W: usize>(
@@ -1493,52 +1571,38 @@ fn tri_tile<T: Scalar, const W: usize>(
     jb: usize,
     je: usize,
 ) {
-    let mut i = jb;
-    while i < je {
-        let rn = TILE_ROWS.min(je - i);
-        let mut acc = [[T::zero(); W]; TILE_ROWS];
-        for r in 0..rn {
-            acc[r].copy_from_slice(&v[(i + r) * nr + c0..(i + r) * nr + c0 + W]);
-        }
-        // the rows above the tile are final
-        for k in jb..i {
-            let vk = &v[k * nr + c0..k * nr + c0 + W];
-            let col = &panel[k * ld + i..k * ld + i + rn];
-            for (ar, &l) in acc.iter_mut().zip(col) {
-                for (a, &x) in ar.iter_mut().zip(vk) {
-                    *a = *a - l * x;
-                }
+    let rn = je - jb;
+    debug_assert!(rn <= TILE_ROWS);
+    let mut acc = [[T::zero(); W]; TILE_ROWS];
+    for r in 0..rn {
+        acc[r].copy_from_slice(&v[(jb + r) * nr + c0..(jb + r) * nr + c0 + W]);
+    }
+    // each row once the rows before it are final
+    for r in 0..rn {
+        for k in jb..jb + r {
+            let l = panel[k * ld + jb + r];
+            let xk = acc[k - jb];
+            for (a, x) in acc[r].iter_mut().zip(xk) {
+                *a = *a - l * x;
             }
         }
-        // inside the tile, each row once the rows before it are final
-        for r in 0..rn {
-            for k in i..i + r {
-                let l = panel[k * ld + i + r];
-                let xk = acc[k - i];
-                for (a, x) in acc[r].iter_mut().zip(xk) {
-                    *a = *a - l * x;
-                }
-            }
-            if let Some(&d) = diag_inv.get(i + r) {
-                for a in acc[r].iter_mut() {
-                    *a = *a * d;
-                }
+        if let Some(&d) = diag_inv.get(jb + r) {
+            for a in acc[r].iter_mut() {
+                *a = *a * d;
             }
         }
-        for r in 0..rn {
-            v[(i + r) * nr + c0..(i + r) * nr + c0 + W].copy_from_slice(&acc[r]);
-        }
-        i += rn;
+    }
+    for r in 0..rn {
+        v[(jb + r) * nr + c0..(jb + r) * nr + c0 + W].copy_from_slice(&acc[r]);
     }
 }
 
 /// The transposed unit-lower triangle of the columns `jb..je` (scaled by `diag_inv` where
-/// it is given) on the row-major right-hand sides `v` (`nr` wide), the block `block` its
-/// column-major panel block (`ld`, row `i` of column `k` at `(k - jb) * ld + i - jb`), last
-/// row first: row `k` takes `- l_ik v_i` for `i` ascending from `k + 1`, then its scale.
-/// The right-hand sides are independent, so a tile of up to [`SOLVE_RHS_TILE`] of them
-/// is kept in registers across a row's terms, in the very order of operations of the
-/// row-at-a-time form, to the bit.
+/// it is given) on the row-major right-hand sides `v` (`nr` wide), `block` its column-major
+/// panel block (`ld`, row `i` of column `k` at `(k - jb) * ld + i - jb`). Blocked by halves
+/// as [`tri_rows`], last half first: its triangle, the first half's rows take the second
+/// half's solved rows in one product ([`bwd_in`]), then the first half's triangle; a half of
+/// at most [`TILE_ROWS`] rows on the register tiles ([`tri_up_tile`]).
 fn tri_up<T: Scalar>(
     v: &mut [T],
     block: &[T],
@@ -1548,20 +1612,58 @@ fn tri_up<T: Scalar>(
     jb: usize,
     je: usize,
 ) {
+    tri_up_at(v, block, diag_inv, ld, nr, jb, jb, je);
+}
+
+/// [`tri_up`] of the rows `lo..hi` of the block of first column `jb`.
+#[allow(clippy::too_many_arguments)]
+fn tri_up_at<T: Scalar>(
+    v: &mut [T],
+    block: &[T],
+    diag_inv: &[T],
+    ld: usize,
+    nr: usize,
+    jb: usize,
+    lo: usize,
+    hi: usize,
+) {
+    if hi - lo > TILE_ROWS {
+        let h = lo + ((hi - lo) / 2).next_multiple_of(TILE_ROWS);
+        tri_up_at(v, block, diag_inv, ld, nr, jb, h, hi);
+        debug_assert!(v.len() >= hi * nr && block.len() >= (h - 1 - jb) * ld + hi - jb);
+        // SAFETY: rows `lo..h` of `v` are written, rows `h..hi` and the block's rows
+        // `h..hi` of the columns `lo..h` read: disjoint, and inside `v` and `block`.
+        unsafe {
+            bwd_in(
+                v.as_mut_ptr(),
+                block.as_ptr(),
+                ld,
+                hi,
+                jb,
+                h,
+                lo..h,
+                0..nr,
+                nr,
+            )
+        };
+        return tri_up_at(v, block, diag_inv, ld, nr, jb, lo, h);
+    }
     let mut c0 = 0;
     while c0 < nr {
         let w = (nr - c0).min(SOLVE_RHS_TILE);
         match w {
-            4 => tri_up_tile::<T, 4>(v, block, diag_inv, ld, nr, c0, jb, je),
-            3 => tri_up_tile::<T, 3>(v, block, diag_inv, ld, nr, c0, jb, je),
-            2 => tri_up_tile::<T, 2>(v, block, diag_inv, ld, nr, c0, jb, je),
-            _ => tri_up_tile::<T, 1>(v, block, diag_inv, ld, nr, c0, jb, je),
+            4 => tri_up_tile::<T, 4>(v, block, diag_inv, ld, nr, c0, jb, lo, hi),
+            3 => tri_up_tile::<T, 3>(v, block, diag_inv, ld, nr, c0, jb, lo, hi),
+            2 => tri_up_tile::<T, 2>(v, block, diag_inv, ld, nr, c0, jb, lo, hi),
+            _ => tri_up_tile::<T, 1>(v, block, diag_inv, ld, nr, c0, jb, lo, hi),
         }
         c0 += w;
     }
 }
 
-/// [`tri_up`] for the right-hand sides `c0..c0 + W`.
+/// The transposed triangle of the rows `lo..hi` (at most [`TILE_ROWS`]) of the block of
+/// first column `jb` for the right-hand sides `c0..c0 + W` ([`tri_up`]), in registers, last
+/// row first: row `k` takes `- l_ik v_i` for `i` ascending from `k + 1`, then its scale.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn tri_up_tile<T: Scalar, const W: usize>(
@@ -1572,14 +1674,15 @@ fn tri_up_tile<T: Scalar, const W: usize>(
     nr: usize,
     c0: usize,
     jb: usize,
-    je: usize,
+    lo: usize,
+    hi: usize,
 ) {
-    for k in (jb..je).rev() {
+    for k in (lo..hi).rev() {
         let col = &block[(k - jb) * ld..];
         let mut acc = [T::zero(); W];
         acc.copy_from_slice(&v[k * nr + c0..k * nr + c0 + W]);
-        // the rows below `k` in the block are final
-        for i in k + 1..je {
+        // the rows below `k` in the range are final
+        for i in k + 1..hi {
             let l = col[i - jb];
             let vi = &v[i * nr + c0..i * nr + c0 + W];
             for (a, &x) in acc.iter_mut().zip(vi) {
@@ -1610,8 +1713,8 @@ fn chunk_align(nr: usize) -> usize {
     }
 }
 
-/// The rows of chunk `i` of the `count` chunks of a product of `rows` rows and
-/// `nr` right-hand sides ([`SolvePlan::node_chunks`]): as even as they can be in
+/// The rows of chunk `i` of the `count` row chunks of a product of `rows` rows
+/// and `nr` right-hand sides ([`SolvePlan::cut`]): as even as they can be in
 /// units of [`chunk_align`] rows, the last one taking the rows past its last unit.
 fn chunk_rows(i: usize, count: usize, rows: usize, nr: usize) -> std::ops::Range<usize> {
     let align = chunk_align(nr);
@@ -1626,9 +1729,23 @@ fn chunk_rows(i: usize, count: usize, rows: usize, nr: usize) -> std::ops::Range
     at(i)..at(i + 1)
 }
 
-/// `f(i)` for the `count` chunks of a node's product
-/// ([`node_chunks`](SolvePlan::node_chunks)): each its own task on the pool
-/// where there are several.
+/// The right-hand sides of group `i` of the `count` groups of `nr` ([`SolvePlan::cut`]):
+/// as even as they can be in register tiles of [`SOLVE_RHS_TILE`], the last one
+/// taking the right-hand sides past its last tile.
+fn col_groups(i: usize, count: usize, nr: usize) -> std::ops::Range<usize> {
+    let tiles = nr / SOLVE_RHS_TILE;
+    let at = |c: usize| {
+        if c >= count {
+            nr
+        } else {
+            c * tiles / count * SOLVE_RHS_TILE
+        }
+    };
+    at(i)..at(i + 1)
+}
+
+/// `f(i)` for the `count` pieces of a node's product ([`SolvePlan::cut`]): each
+/// its own task on the pool where there are several.
 fn run_chunks(count: usize, f: impl Fn(usize) + Sync + Send) {
     let _s = rsprobe::scope!(TRACE, "product");
     rsprobe::add!(TRACE, "chunks", count);
@@ -1651,11 +1768,12 @@ fn node_mode() -> crate::dense::gemm_backend::GemmMode {
 }
 
 /// Forward, a node's own rows `rows` (from `je` on) take the solved block
-/// `jb..je`: `y[rows] -= L[rows, jb..je] y[jb..je]`, `y` the node's rows (`nr`
-/// wide), `block` the diagonal block ([`Layout::blocks`], `ld`).
+/// `jb..je`: `y[rows, cols] -= L[rows, jb..je] y[jb..je, cols]`, `y` the node's
+/// rows (`nr` wide), `block` the diagonal block ([`Layout::blocks`], `ld`).
 ///
-/// SAFETY: `y` holds the node's rows and `block` its block; rows `rows` are
-/// written by this call alone, rows `jb..je` and the block only read.
+/// SAFETY: `y` holds the node's rows and `block` its block; rows `rows` of the
+/// right-hand sides `cols` are written by this call alone, rows `jb..je` and
+/// the block only read.
 #[allow(clippy::too_many_arguments)]
 unsafe fn fwd_own<T: Scalar>(
     y: *mut T,
@@ -1664,20 +1782,21 @@ unsafe fn fwd_own<T: Scalar>(
     jb: usize,
     je: usize,
     rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
     nr: usize,
 ) {
     crate::dense::gemm_backend::gemm(
         rows.len(),
-        nr,
+        cols.len(),
         je - jb,
-        y.add(rows.start * nr),
+        y.add(rows.start * nr + cols.start),
         1,
         nr as isize,
         true,
         block.add(rows.start - jb),
         ld as isize,
         1,
-        y.add(jb * nr) as *const T,
+        y.add(jb * nr + cols.start) as *const T,
         1,
         nr as isize,
         T::one(),
@@ -1690,10 +1809,11 @@ unsafe fn fwd_own<T: Scalar>(
 }
 
 /// Forward, the rows `rows` below a node of width `w` take the solved block
-/// `jb..je`: `t[rows] (+)= L_off[rows, jb..je] y[jb..je]`, stored where `!add`
-/// (the first block), `t` the rows below the node (`nr` wide).
+/// `jb..je`: `t[rows, cols] (+)= L_off[rows, jb..je] y[jb..je, cols]`, stored
+/// where `!add` (the first block), `t` the rows below the node (`nr` wide).
 ///
-/// SAFETY: as [`fwd_own`]; rows `rows` of `t` are written by this call alone.
+/// SAFETY: as [`fwd_own`]; rows `rows` of `t` in the right-hand sides `cols`
+/// are written by this call alone.
 #[allow(clippy::too_many_arguments)]
 unsafe fn fwd_below<T: Scalar>(
     t: *mut T,
@@ -1703,21 +1823,22 @@ unsafe fn fwd_below<T: Scalar>(
     je: usize,
     y: *const T,
     rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
     nr: usize,
     add: bool,
 ) {
     crate::dense::gemm_backend::gemm(
         rows.len(),
-        nr,
+        cols.len(),
         je - jb,
-        t.add(rows.start * nr),
+        t.add(rows.start * nr + cols.start),
         1,
         nr as isize,
         add,
         rect.add(jb * m + rows.start),
         m as isize,
         1,
-        y.add(jb * nr),
+        y.add(jb * nr + cols.start),
         1,
         nr as isize,
         T::one(),
@@ -1730,7 +1851,8 @@ unsafe fn fwd_below<T: Scalar>(
 }
 
 /// Backward, a node's rows `rows` (in the block `jb..`) take its `m` rows below:
-/// `x[rows] -= L_off[.., rows]^T g`, `g` their final values gathered (`nr` wide).
+/// `x[rows, cols] -= L_off[.., rows]^T g[.., cols]`, `g` their final values
+/// gathered (`nr` wide).
 ///
 /// SAFETY: as [`fwd_own`]; `g` holds `m` rows.
 unsafe fn bwd_off<T: Scalar>(
@@ -1739,20 +1861,21 @@ unsafe fn bwd_off<T: Scalar>(
     m: usize,
     g: *const T,
     rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
     nr: usize,
 ) {
     crate::dense::gemm_backend::gemm(
         rows.len(),
-        nr,
+        cols.len(),
         m,
-        x.add(rows.start * nr),
+        x.add(rows.start * nr + cols.start),
         1,
         nr as isize,
         true,
         rect.add(rows.start * m),
         1,
         m as isize,
-        g,
+        g.add(cols.start),
         1,
         nr as isize,
         T::one(),
@@ -1765,7 +1888,7 @@ unsafe fn bwd_off<T: Scalar>(
 }
 
 /// Backward, a node's rows `rows` of the block `jb..je` take its solved rows
-/// `je..w` in one product: `x[rows] -= L[je..w, rows]^T x[je..w]`.
+/// `je..w` in one product: `x[rows, cols] -= L[je..w, rows]^T x[je..w, cols]`.
 ///
 /// SAFETY: as [`fwd_own`]; rows `je..w` are only read.
 #[allow(clippy::too_many_arguments)]
@@ -1777,20 +1900,21 @@ unsafe fn bwd_in<T: Scalar>(
     jb: usize,
     je: usize,
     rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
     nr: usize,
 ) {
     crate::dense::gemm_backend::gemm(
         rows.len(),
-        nr,
+        cols.len(),
         w - je,
-        x.add(rows.start * nr),
+        x.add(rows.start * nr + cols.start),
         1,
         nr as isize,
         true,
         block.add(je - jb + (rows.start - jb) * ld),
         1,
         ld as isize,
-        x.add(je * nr) as *const T,
+        x.add(je * nr + cols.start) as *const T,
         1,
         nr as isize,
         T::one(),
@@ -2092,21 +2216,40 @@ mod tests {
         rn / bn
     }
 
+    /// A lent pool of more threads than any product has pieces, whose sections
+    /// cost nothing: every product of the sweeps is cut into its finest pieces
+    /// ([`cut`](super::SolvePlan::cut)), its pieces and tasks run in order on
+    /// the calling thread.
+    struct Finest;
+
+    impl crate::parallel::Pool for Finest {
+        fn threads(&self) -> usize {
+            1 << 12
+        }
+        fn dispatch(&self) -> crate::parallel::Dispatch {
+            crate::parallel::Dispatch::free(1 << 12)
+        }
+        fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+            (0..n).for_each(f)
+        }
+    }
+
     /// The ancestors' task DAG (`forward_dag`, `backward_dag`) solves as the
     /// level sweeps do, to the bit: a tree cut into few subtrees, so most of
     /// it lies above the cut, every sweep on the pool, against one thread (the
-    /// level sweeps); LU and LDL^T, one and several right-hand sides, nodes of
-    /// several tiles, every product cut into its finest row chunks, for one
-    /// right-hand side too ([`node_chunks`](super::SolvePlan::node_chunks)), so
-    /// the DAG holds thousands of tasks and their order varies from run to run.
+    /// level sweeps); LU (real and complex) and LDL^T, one and several
+    /// right-hand sides, nodes of several tiles; on rayon pools, where the
+    /// order of the tasks varies from run to run, and on [`Finest`], where
+    /// every product runs in its finest pieces of rows and of right-hand sides,
+    /// for one right-hand side too, so the DAG holds thousands of tasks.
     #[test]
     fn ancestor_tasks_solve_as_the_levels_do() {
         use crate::{LuSolver, OrderingMethod};
+        use num_complex::Complex;
         let opts = SolverSettings {
             solve: crate::SolveSettings {
                 leaf_subtrees: 4,
                 par_min_work: Some(0),
-                gemm_task: 1,
             },
             ..SolverSettings::default()
         }
@@ -2118,6 +2261,8 @@ mod tests {
                 .build()
                 .unwrap()
         };
+        let finest =
+            |f: &mut (dyn FnMut() + Send)| crate::parallel::install(std::sync::Arc::new(Finest), f);
         let nrhs = 64;
         let a = convdiff(80);
         let n = a.n;
@@ -2125,22 +2270,41 @@ mod tests {
         let bb: Vec<f64> = (0..n * nrhs)
             .map(|k| ((k * 13) % 11) as f64 - 5.0)
             .collect();
-        // an ancestor whose product below it runs in several chunks for one right-hand side
+        // an ancestor whose product below it runs in several pieces for one
+        // right-hand side, and one in several groups of right-hand sides
         use super::SolvePlan;
-        let chunked = |p: &SolvePlan<f64>| {
-            p.top.iter().any(|&s| {
-                let (_, w, _, m, _, _) = p.node(s);
-                p.node_chunks(true, m, w, 1) > 1
-            })
+        let cut = |p: &SolvePlan<f64>, nr: usize, f: fn(super::Cut) -> usize| {
+            let mut any = false;
+            finest(&mut || {
+                any = p.top.iter().any(|&s| {
+                    let (_, w, _, m, _, _) = p.node(s);
+                    f(p.cut(true, m, w, nr)) > 1
+                })
+            });
+            any
         };
         let lu = on(1).install(|| LuSolver::factor(&a, &opts).unwrap());
         assert!(
             !lu.plan_l.top.is_empty() && !lu.plan_l.chain,
             "a tree above the cut"
         );
-        assert!(chunked(&lu.plan_l), "LU products in chunks");
+        assert!(cut(&lu.plan_l, 1, |c| c.rows), "LU products in row chunks");
+        assert!(cut(&lu.plan_l, nrhs, |c| c.cols), "LU products in groups");
         let (x1, xb1) =
             on(1).install(|| (lu.solve(&b).unwrap(), lu.solve_many(&bb, nrhs).unwrap()));
+        let ac = crate::GeneralCsc {
+            n,
+            col_ptr: a.col_ptr.clone(),
+            row_idx: a.row_idx.clone(),
+            values: (a.values.iter().enumerate())
+                .map(|(k, &v)| Complex::new(v, 0.1 * ((k % 7) as f64 - 3.0)))
+                .collect(),
+        };
+        let cb: Vec<Complex<f64>> = (0..n * nrhs)
+            .map(|k| Complex::new(((k * 13) % 11) as f64 - 5.0, ((k * 3) % 5) as f64 - 2.0))
+            .collect();
+        let luc = on(1).install(|| LuSolver::factor(&ac, &opts).unwrap());
+        let cb1 = on(1).install(|| luc.solve_many(&cb, nrhs).unwrap());
         let g = grid3d(14);
         let gb: Vec<f64> = (0..g.n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
         let gbb: Vec<f64> = (0..g.n * nrhs)
@@ -2151,31 +2315,32 @@ mod tests {
             !ld.plan.top.is_empty() && !ld.plan.chain,
             "a tree above the cut"
         );
-        assert!(chunked(&ld.plan), "LDL^T products in chunks");
+        assert!(cut(&ld.plan, 1, |c| c.rows), "LDL^T products in row chunks");
         let tiled =
             (ld.plan.top.iter()).any(|&s| ld.plan.node(s).1 > 2 * crate::constants::PANEL_BLOCK);
         assert!(tiled, "an ancestor of three tiles or more");
         let (g1, gb1) =
             on(1).install(|| (ld.solve(&gb).unwrap(), ld.solve_many(&gbb, nrhs).unwrap()));
+        let check = |run: &dyn Fn(&mut (dyn FnMut() + Send)), what: &str| {
+            let (mut x, mut xb, mut xc, mut y, mut yb) = (None, None, None, None, None);
+            run(&mut || {
+                x = Some(lu.solve(&b).unwrap());
+                xb = Some(lu.solve_many(&bb, nrhs).unwrap());
+                xc = Some(luc.solve_many(&cb, nrhs).unwrap());
+                y = Some(ld.solve(&gb).unwrap());
+                yb = Some(ld.solve_many(&gbb, nrhs).unwrap());
+            });
+            assert_eq!(x.as_ref(), Some(&x1), "LU {what}");
+            assert_eq!(xb.as_ref(), Some(&xb1), "LU block {what}");
+            assert_eq!(xc.as_ref(), Some(&cb1), "complex LU block {what}");
+            assert_eq!(y.as_ref(), Some(&g1), "LDLT {what}");
+            assert_eq!(yb.as_ref(), Some(&gb1), "LDLT block {what}");
+        };
         for t in [2usize, 5, 8] {
             let pool = on(t);
-            assert_eq!(pool.install(|| lu.solve(&b).unwrap()), x1, "LU threads={t}");
-            assert_eq!(
-                pool.install(|| lu.solve_many(&bb, nrhs).unwrap()),
-                xb1,
-                "LU block threads={t}"
-            );
-            assert_eq!(
-                pool.install(|| ld.solve(&gb).unwrap()),
-                g1,
-                "LDLT threads={t}"
-            );
-            assert_eq!(
-                pool.install(|| ld.solve_many(&gbb, nrhs).unwrap()),
-                gb1,
-                "LDLT block threads={t}"
-            );
+            check(&|f| pool.install(f), &format!("threads={t}"));
         }
+        check(&|f| finest(f), "finest pieces");
     }
 
     #[test]

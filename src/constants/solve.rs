@@ -51,39 +51,9 @@ pub const SOLVE_PAR_MIN_ENTRY_RHS: usize = 1 << 20;
 /// the tile width only groups them).
 pub const SOLVE_RHS_TILE: usize = 4;
 
-/// Work of a row chunk of a node's products in the sweeps, in panel entries
-/// times right-hand sides: a product of more is cut into row chunks, which
-/// an ancestor runs on the pool.
-/// Used by: `SolveSettings::gemm_task` (`supernodal::solve::SolvePlan::node_chunks`).
-/// Why: the ancestors' chain to the root is the critical path of the sweeps,
-/// and its nodes are mostly narrow and deep (tia130a near-field LU, 15.8 k
-/// unknowns, 16 right-hand sides: of the forward chain's 5.0 M entries 0.9 M
-/// in triangles, the rest below them in nodes such as 77 x 1601 or
-/// 743 x 1278). Whole products of up to 4 M entries times right-hand sides
-/// and triangles on one thread capped both sweeps of the ancestors at 2.7 to
-/// 2.9 times their one-thread time on 12 threads. At the 0.22 ns an entry
-/// and right-hand side the ancestors took there, a chunk is about 30 us,
-/// several times a task's start. With these chunks the ancestors' sweeps run
-/// 3.2 (forward) and 3.9 (backward) times faster on 12 threads than on one,
-/// the solve 38.6 -> 32.4 ms (EPYC-Milan, 6 cores / 12 threads, median of 21,
-/// `examples/lu_solve_timing.rs` with `RSLAB_DELAYED=1`). Swept with
-/// `RSLAB_GEMM_TASK` on 12 threads (leaf subtrees 128), ms:
-///
-/// | entries x rhs | 2^14 | 2^15 | 2^16 | 2^17 | 2^18 | 2^19 |
-/// |---------------|------|------|------|------|------|------|
-/// | 4 rhs         | 15.6 | 17.0 | 16.1 | 17.6 | 18.4 | 19.0 |
-/// | 16 rhs        | 32.1 | 32.1 | 30.0 | 29.6 | 31.8 | 30.8 |
-///
-/// Within the run-to-run spread from 2^14 to 2^17 at 16 right-hand sides
-/// (2^21: 43.6 before the products below a node ran in one section); 4 favour
-/// smaller chunks by up to a tenth, not reproduced on 6 threads.
-/// Contract: timing (a row's sums are the same in a chunk as in the whole
-/// product; see `node_chunks`).
-pub const SOLVE_GEMM_TASK: usize = 1 << 17;
-
 /// Rows a row chunk of a node's product for one right-hand side starts at a
 /// multiple of (rows).
-/// Used by: `supernodal::solve::chunk_align` (`SolvePlan::node_chunks`, `chunk_rows`).
+/// Used by: `supernodal::solve::chunk_align` (`SolvePlan::cut`, `chunk_rows`).
 /// Why: for one right-hand side the GEMM runs a matrix-vector product whose
 /// column runs the rows in SIMD lanes from the product's first row and the rows
 /// past its last full lane one by one, with other rounding; a chunk starting at

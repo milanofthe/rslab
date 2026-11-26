@@ -426,11 +426,6 @@ pub struct SolveSettings {
     /// [`SOLVE_PAR_MIN_ENTRY_RHS`](crate::constants::SOLVE_PAR_MIN_ENTRY_RHS)
     /// before either is measured. The same bits either way.
     pub par_min_work: Option<usize>,
-    /// Work of a row chunk of an ancestor's products on the pool, in panel
-    /// entries times right-hand sides. Default
-    /// [`SOLVE_GEMM_TASK`](crate::constants::SOLVE_GEMM_TASK). The same bits
-    /// for any value.
-    pub gemm_task: usize,
 }
 
 impl Default for SolveSettings {
@@ -438,7 +433,6 @@ impl Default for SolveSettings {
         Self {
             leaf_subtrees: SOLVE_LEAF_SUBTREES,
             par_min_work: None,
-            gemm_task: SOLVE_GEMM_TASK,
         }
     }
 }

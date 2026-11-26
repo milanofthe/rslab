@@ -2,8 +2,8 @@
 //! nodes, each tile [`PANEL_BLOCK`] columns of a node's panel
 //! ([`Layout`]).
 //!
-//! Forward, per ancestor with `nb` tiles and `nc` row chunks below it
-//! ([`SolvePlan::node_chunks`] at the depth of one tile):
+//! Forward, per ancestor with `nb` tiles and `nc` pieces of its rows below
+//! ([`SolvePlan::cut`] at the depth of one tile):
 //! - `Take(b)`: tile `b`'s columns take the terms the leaf subtrees and the
 //!   descendants above the cut accumulated for them, in the order of `pull`;
 //!   open while a child's row chunk that reaches the tile, or a child's own
@@ -12,36 +12,38 @@
 //!   tile's product reached its rows (tile 0: once it took its terms).
 //! - `Own(g, s)`: tile `g`'s rows take the solved tile `s < g` ([`fwd_own`]),
 //!   after `Tri(s)` and after `Own(g, s - 1)` (`Take(g)` for `s = 0`).
-//! - `Below(c, s)`: chunk `c` of the rows below takes tile `s` into the
+//! - `Below(c, s)`: piece `c` of the rows below takes tile `s` into the
 //!   node's accumulator ([`fwd_below`]), after `Tri(s)` and `Below(c, s - 1)`.
-//!   The last one done completes the chunk; a node is complete once its
-//!   chunks and its children are.
+//!   The last one done completes the piece; a node is complete once its
+//!   pieces and its children are.
 //!
 //! The critical path through a node is its triangles, one tile product each
-//! between them and the last tile's row chunk; the parent's first tile starts
-//! once the chunks that reach it are done. Backward, per ancestor, once its
+//! between them and the last tile's piece below; the parent's first tile starts
+//! once the pieces that reach it are done. Backward, per ancestor, once its
 //! parent is complete (its rows below are final), in the arithmetic of
 //! [`bwd_node_gemm`](SolvePlan::bwd_node_gemm):
-//! - `Start`: the rows below gathered into the node's accumulator block.
-//! - `Off(b, q)`: chunk `q` of tile `b`'s rows takes the rows below
-//!   ([`bwd_off`]).
-//! - `In(b, q)`: chunk `q` of tile `b`'s rows takes the solved tiles after it
-//!   in one product ([`bwd_in`]), after `Off(b, ..)` and `Tri(b + 1)`.
+//! - `Start`: the node's gather opens, in pieces of its rows below as many as
+//!   the copy is worth ([`PERMUTE_RATE`](crate::numeric::direct::PERMUTE_RATE)).
+//! - `Gather(q)`: piece `q` of the rows below gathered into the node's
+//!   accumulator block; the last one done starts the products below.
+//! - `Off(b, q)`: piece `q` of tile `b` takes the rows below ([`bwd_off`]).
+//! - `In(b, q)`: piece `q` of tile `b` takes the solved tiles after it in one
+//!   product ([`bwd_in`]), after `Off(b, ..)` and `Tri(b + 1)`.
 //! - `Tri(b)`: the triangle of tile `b` ([`tri_up`]) after `In(b, ..)`; the last
 //!   (`b = 0`) starts the children.
 //!
 //! Every row takes its terms in the order of the level sweeps (a tile's
 //! products in tile order, the terms of the sources in `pull` order), each
-//! product cut by rows only, so the solution is the one of a single thread to
-//! the bit whatever runs when. A task counts its open inputs; the task that
+//! product cut into pieces of rows and right-hand sides, so the solution is the
+//! one of a single thread to the bit whatever runs when. A task counts its open inputs; the task that
 //! closes the last one runs it, the first such on its own thread and the rest
 //! spawned in the scope, so the critical successor (the next tile's product
 //! after a triangle, the triangle after its last product) runs where its
 //! inputs were made.
 
 use super::{
-    bwd_in, bwd_off, chunk_align, chunk_rows, fwd_below, fwd_own, sub_assign, tri_rows, tri_up,
-    PlanWork, Shared, SolvePlan, NONE,
+    bwd_in, bwd_off, chunk_align, fwd_below, fwd_own, sub_assign, tri_rows, tri_up, Cut, PlanWork,
+    Shared, SolvePlan, NONE,
 };
 use crate::constants::PANEL_BLOCK;
 use crate::numeric::supernodal::panel::Layout;
@@ -57,11 +59,21 @@ pub(crate) struct DagWork {
     open: Vec<AtomicU32>,
     /// Per ancestor, the start of its counters in `open` (`top.len() + 1`).
     base: Vec<usize>,
-    /// Forward: per ancestor, the start of its row chunks in `tiles`
+    /// Forward: per ancestor, the start of its pieces below in `tiles`
     /// (`top.len() + 1`).
     chunk_ptr: Vec<usize>,
-    /// Forward: per row chunk, the parent's tiles its rows lie in, `lo..hi`.
+    /// Forward: per ancestor, the cut of its rows below ([`SolvePlan::cut`]).
+    below: Vec<Cut>,
+    /// Forward: per piece below, the parent's tiles its rows lie in, `lo..hi`.
     tiles: Vec<(u32, u32)>,
+    /// Backward: per ancestor, the start of its tiles in `tile_cuts`
+    /// (`top.len() + 1`).
+    tile_ptr: Vec<usize>,
+    /// Backward: per tile, the cuts of its product of the rows below and of
+    /// its product of the tiles after it.
+    tile_cuts: Vec<(Cut, Cut)>,
+    /// Backward: per ancestor, the pieces its gather of the rows below runs in.
+    gathers: Vec<usize>,
     /// Forward: the takes with no open input, `(top index, tile)`, collected
     /// before any task runs (a running task may make others ready, which it
     /// then runs itself).
@@ -160,6 +172,7 @@ struct FwdNode {
     m: usize,
     nb: usize,
     nc: usize,
+    cut: Cut,
     /// The last tile has fewer rows than a product's least ([`chunk_align`]):
     /// its rows join the tile before it in the products of the tiles before
     /// that (in the level sweeps they lie inside one product of more rows).
@@ -228,6 +241,7 @@ fn fwd_node<T: Scalar>(plan: &SolvePlan<T>, dag: &DagWork, nr: usize, ti: usize)
         m,
         nb,
         nc: dag.chunk_ptr[ti + 1] - dag.chunk_ptr[ti],
+        cut: dag.below[ti],
         merged: nb > 2 && w - (nb - 1) * PANEL_BLOCK < chunk_align(nr),
         base: dag.base[ti],
     }
@@ -273,7 +287,7 @@ impl<T: Scalar> Fwd<'_, T> {
         }
     }
 
-    /// Chunk `c` of ancestor `ti`'s rows below is done.
+    /// Piece `c` of ancestor `ti`'s rows below is done.
     fn chunk_done<'s>(
         &'s self,
         ti: usize,
@@ -402,7 +416,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                 let joined = rows.end > ((g + 1) * PANEL_BLOCK).min(w);
                 {
                     let _s = rsprobe::scope!(TRACE, "product");
-                    unsafe { fwd_own(yn, panel.as_ptr().add(off), ld, jb, je, rows, nr) };
+                    unsafe { fwd_own(yn, panel.as_ptr().add(off), ld, jb, je, rows, 0..nr, nr) };
                 }
                 if s + 1 == g {
                     ready.push(FwdTask::Tri(ti as u32, g as u32));
@@ -416,7 +430,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
             FwdTask::Below(_, c, s) => {
                 let (c, s) = (c as usize, s as usize);
                 let (jb, je, _, _) = block(s);
-                let rows = chunk_rows(c, nd.nc, m, nr);
+                let (rows, cols) = nd.cut.piece(c, m, nr);
                 let acc = unsafe { self.acc.ptr().add(plan.top_acc_off[ti] * nr) };
                 {
                     let _s = rsprobe::scope!(TRACE, "product");
@@ -429,6 +443,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
                             je,
                             yn,
                             rows,
+                            cols,
                             nr,
                             s > 0,
                         )
@@ -450,6 +465,7 @@ impl<T: Scalar> Dag for Fwd<'_, T> {
 #[derive(Clone, Copy)]
 enum BwdTask {
     Start(u32),
+    Gather(u32, u32),
     Off(u32, u32, u32),
     In(u32, u32, u32),
     Tri(u32, u32),
@@ -464,30 +480,48 @@ struct Bwd<'a, T> {
 }
 
 impl<T: Scalar> Bwd<'_, T> {
-    /// The row chunks of tile `jb..je` of a node with `m` rows below: of its
-    /// product of the rows below, and of its product of the tiles after it
-    /// (as [`bwd_node_gemm`](SolvePlan::bwd_node_gemm) cuts them).
-    fn chunks(&self, w: usize, m: usize, jb: usize, je: usize) -> (usize, usize) {
-        let p = self.plan;
-        let off = if m > 0 {
-            p.node_chunks(true, je - jb, m, self.nr)
-        } else {
-            0
-        };
-        let inner = if je < w {
-            p.node_chunks(true, je - jb, w - je, self.nr)
-        } else {
-            0
-        };
-        (off, inner)
+    /// The cuts of tile `b` of ancestor `ti`: of its product of the rows below,
+    /// and of its product of the tiles after it (as
+    /// [`bwd_node_gemm`](SolvePlan::bwd_node_gemm) cuts them).
+    fn cuts(&self, ti: usize, b: usize) -> (Cut, Cut) {
+        self.dag.tile_cuts[self.dag.tile_ptr[ti] + b]
+    }
+
+    /// Rows `rows` of ancestor `ti`'s rows below gathered from the final
+    /// solution into its block `g`.
+    fn gather(&self, ti: usize, rows: std::ops::Range<usize>) {
+        let (p, nr) = (self.plan, self.nr);
+        let r0 = p.row_ptr[p.top[ti] as usize];
+        let g = self.g.ptr();
+        let _s = rsprobe::scope!(TRACE, "take");
+        for k in rows {
+            let r = p.rows[r0 + k] as usize;
+            // SAFETY: the rows below lie in complete ancestors; row `k` of the
+            // block is this gather's alone.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    self.x.ptr().add(r * nr),
+                    g.add((p.top_acc_off[ti] + k) * nr),
+                    nr,
+                )
+            }
+        }
+    }
+
+    /// Ancestor `ti`'s rows below are gathered: its products of them, the
+    /// last tile's pieces first (they lead to its triangle).
+    fn gathered<'s>(&'s self, ti: usize, nb: usize, ready: &mut Ready<'_, '_, 's, Self>) {
+        for b in (0..nb).rev() {
+            for q in 0..self.cuts(ti, b).0.len() {
+                ready.push(BwdTask::Off(ti as u32, b as u32, q as u32));
+            }
+        }
     }
 
     /// Tile `b` took its rows below and the tiles after it are solved: its
     /// product of those.
     fn stepped<'s>(&'s self, ti: usize, b: usize, ready: &mut Ready<'_, '_, 's, Self>) {
-        let (_, w, _, m, _, _) = self.plan.node(self.plan.top[ti]);
-        let (jb, je, _, _) = Layout::new(w, m).blocks().nth(b).unwrap_or((0, 0, 0, 0));
-        let (_, inner) = self.chunks(w, m, jb, je);
+        let inner = self.cuts(ti, b).1.len();
         if inner == 0 {
             return ready.push(BwdTask::Tri(ti as u32, b as u32));
         }
@@ -503,14 +537,17 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
     fn step<'s>(&'s self, task: BwdTask, ready: &mut Ready<'_, '_, 's, Self>) {
         let (plan, nr, dag) = (self.plan, self.nr, self.dag);
         let ti = match task {
-            BwdTask::Start(t) | BwdTask::Off(t, ..) | BwdTask::In(t, ..) | BwdTask::Tri(t, ..) => {
-                t as usize
-            }
+            BwdTask::Start(t)
+            | BwdTask::Gather(t, _)
+            | BwdTask::Off(t, ..)
+            | BwdTask::In(t, ..)
+            | BwdTask::Tri(t, ..) => t as usize,
         };
-        let (c0, w, r0, m, _, panel) = plan.node(plan.top[ti]);
+        let (c0, w, _, m, _, panel) = plan.node(plan.top[ti]);
         let nb = tiles_of(w);
         let base = dag.base[ti];
         let (step, tri_open) = (|b: usize| base + b, |b: usize| base + nb + b);
+        let pieces = dag.gathers[ti];
         let lay = Layout::new(w, m);
         let block = |b: usize| lay.blocks().nth(b).unwrap_or((0, 0, 0, 0));
         // SAFETY: as in the forward DAG; the rows below (`g`) are written by
@@ -519,34 +556,28 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
         let g = unsafe { self.g.ptr().add(plan.top_acc_off[ti] * nr) };
         match task {
             BwdTask::Start(_) => {
-                {
-                    let _s = rsprobe::scope!(TRACE, "take");
-                    for (k, &r) in plan.rows[r0..r0 + m].iter().enumerate() {
-                        // SAFETY: the rows below lie in complete ancestors.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                self.x.ptr().add(r as usize * nr),
-                                g.add(k * nr),
-                                nr,
-                            )
-                        }
-                    }
-                }
                 if m == 0 {
                     return ready.push(BwdTask::Tri(ti as u32, nb as u32 - 1));
                 }
-                // the last tile's chunks first: they lead to its triangle
-                for b in (0..nb).rev() {
-                    let (jb, je, _, _) = block(b);
-                    for q in 0..self.chunks(w, m, jb, je).0 {
-                        ready.push(BwdTask::Off(ti as u32, b as u32, q as u32));
-                    }
+                if pieces < 2 {
+                    self.gather(ti, 0..m);
+                    return self.gathered(ti, nb, ready);
+                }
+                for q in 0..pieces {
+                    ready.push(BwdTask::Gather(ti as u32, q as u32));
+                }
+            }
+            BwdTask::Gather(_, q) => {
+                let q = q as usize;
+                self.gather(ti, q * m / pieces..(q + 1) * m / pieces);
+                if dag.close(base + 2 * nb) {
+                    self.gathered(ti, nb, ready);
                 }
             }
             BwdTask::Off(_, b, q) => {
                 let b = b as usize;
                 let (jb, je, _, _) = block(b);
-                let r = chunk_rows(q as usize, self.chunks(w, m, jb, je).0, je - jb, nr);
+                let (r, c) = self.cuts(ti, b).0.piece(q as usize, je - jb, nr);
                 {
                     let _s = rsprobe::scope!(TRACE, "product");
                     unsafe {
@@ -556,6 +587,7 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                             m,
                             g,
                             jb + r.start..jb + r.end,
+                            c,
                             nr,
                         )
                     };
@@ -567,7 +599,7 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
             BwdTask::In(_, b, q) => {
                 let b = b as usize;
                 let (jb, je, off, ld) = block(b);
-                let r = chunk_rows(q as usize, self.chunks(w, m, jb, je).1, je - jb, nr);
+                let (r, c) = self.cuts(ti, b).1.piece(q as usize, je - jb, nr);
                 {
                     let _s = rsprobe::scope!(TRACE, "product");
                     unsafe {
@@ -579,6 +611,7 @@ impl<T: Scalar> Dag for Bwd<'_, T> {
                             jb,
                             je,
                             jb + r.start..jb + r.end,
+                            c,
                             nr,
                         )
                     };
@@ -623,13 +656,16 @@ impl<T: Scalar> SolvePlan<T> {
         let dag = &mut work.dag;
         dag.base.clear();
         dag.chunk_ptr.clear();
+        dag.below.clear();
         let (mut at, mut chunks) = (0, 0);
         for ti in 0..nt {
             let (_, w, _, m, _, _) = self.node(self.top[ti]);
             let nb = tiles_of(w);
-            let nc = self.node_chunks(true, m, w.min(PANEL_BLOCK), nr);
+            let cut = self.cut(true, m, w.min(PANEL_BLOCK), nr);
+            let nc = cut.len();
             dag.base.push(at);
             dag.chunk_ptr.push(chunks);
+            dag.below.push(cut);
             at += nb * (nb + 1) / 2 + nc * nb + 2;
             chunks += nc;
         }
@@ -673,7 +709,7 @@ impl<T: Scalar> SolvePlan<T> {
             for c in 0..nd.nc {
                 let mut reach = (0, 0);
                 if let Some(pn) = &pn {
-                    let r = chunk_rows(c, nd.nc, nd.m, nr);
+                    let r = nd.cut.piece(c, nd.m, nr).0;
                     let r0 = self.row_ptr[self.top[ti] as usize];
                     let list = &self.rows[r0 + r.start..r0 + r.end];
                     let a = list.partition_point(|&x| (x as usize) < pn.c0);
@@ -736,13 +772,27 @@ impl<T: Scalar> SolvePlan<T> {
         super::grow(&mut work.top_acc, self.top_acc_off[nt] * nr);
         let dag = &mut work.dag;
         dag.base.clear();
+        dag.tile_ptr.clear();
+        dag.tile_cuts.clear();
+        dag.gathers.clear();
         let mut at = 0;
         for ti in 0..nt {
-            let (_, w, _, _, _, _) = self.node(self.top[ti]);
+            let (_, w, _, m, _, _) = self.node(self.top[ti]);
             dag.base.push(at);
-            at += 2 * tiles_of(w);
+            dag.tile_ptr.push(dag.tile_cuts.len());
+            // the tiles' steps and triangles, and the gather
+            at += 2 * tiles_of(w) + 1;
+            let copy =
+                crate::parallel::Work::of((m * nr) as f64, &crate::numeric::direct::PERMUTE_RATE);
+            dag.gathers.push(crate::parallel::width(copy.time(), m));
+            for (jb, je, _, _) in Layout::new(w, m).blocks() {
+                let off = self.cut(true, je - jb, m, nr);
+                let inner = self.cut(true, je - jb, w - je, nr);
+                dag.tile_cuts.push((off, inner));
+            }
         }
         dag.base.push(at);
+        dag.tile_ptr.push(dag.tile_cuts.len());
         dag.reset(at);
         let bwd = Bwd {
             plan: self,
@@ -752,14 +802,19 @@ impl<T: Scalar> SolvePlan<T> {
             dag: &work.dag,
         };
         for ti in 0..nt {
-            let (_, w, _, m, _, _) = self.node(self.top[ti]);
+            let (_, w, _, _, _, _) = self.node(self.top[ti]);
             let (nb, base) = (tiles_of(w), bwd.dag.base[ti]);
-            for (b, (jb, je, _, _)) in Layout::new(w, m).blocks().enumerate() {
-                let (off, inner) = bwd.chunks(w, m, jb, je);
+            for b in 0..nb {
+                let (off, inner) = bwd.cuts(ti, b);
                 let set = |i: usize, v: usize| bwd.dag.open[i].store(v as u32, Ordering::Relaxed);
-                set(base + b, off + usize::from(b + 1 < nb));
-                set(base + nb + b, inner);
+                set(base + b, off.len() + usize::from(b + 1 < nb));
+                set(base + nb + b, inner.len());
             }
+            let gathers = bwd.dag.gathers[ti];
+            bwd.dag.open[base + 2 * nb].store(
+                if gathers > 1 { gathers as u32 } else { 0 },
+                Ordering::Relaxed,
+            );
         }
         let bwd = &bwd;
         crate::parallel::scope(crate::parallel::Work::ns(f64::INFINITY), |sc| {
