@@ -50,10 +50,6 @@ impl Default for BemOpts {
     }
 }
 
-/// A rough quasi-spherical point cloud: even Fibonacci **directions** (the unit
-/// normals `n_i`), each pushed to radius `1 + rough*jitter` so radii vary - which
-/// breaks the sphere's symmetry and makes the double-layer operator unsymmetric.
-/// Returns `(points, normals)`.
 fn surface_points(n: usize, rough: f64, seed: u64) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
     let golden = std::f64::consts::PI * (1.0 + 5.0_f64.sqrt());
     let mut rng = Rng::new(seed);
@@ -63,10 +59,10 @@ fn surface_points(n: usize, rough: f64, seed: u64) -> (Vec<[f64; 3]>, Vec<[f64; 
         let z = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
         let r = (1.0 - z * z).max(0.0).sqrt();
         let th = golden * i as f64;
-        let dir = [r * th.cos(), r * th.sin(), z]; // unit direction = normal
+        let normal = [r * th.cos(), r * th.sin(), z];
         let rad = 1.0 + rough * (rng.unit() - 0.5);
-        pts.push([dir[0] * rad, dir[1] * rad, dir[2] * rad]);
-        nrm.push(dir);
+        pts.push([normal[0] * rad, normal[1] * rad, normal[2] * rad]);
+        nrm.push(normal);
     }
     (pts, nrm)
 }
@@ -78,11 +74,10 @@ pub fn kernel(n: usize, opts: &BemOpts) -> GeneralCsc<C> {
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
     let cutoff2 = opts.cutoff * opts.cutoff;
     for i in 0..n {
-        // Diagonal self-term.
         rows.push(i);
         cols.push(i);
         vals.push(opts.self_term);
-        let ni = nrm[i]; // observation normal (unit direction)
+        let ni = nrm[i];
         for j in 0..n {
             if i == j {
                 continue;
@@ -90,12 +85,11 @@ pub fn kernel(n: usize, opts: &BemOpts) -> GeneralCsc<C> {
             let dx = [p[i][0] - p[j][0], p[i][1] - p[j][1], p[i][2] - p[j][2]];
             let r2 = dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2];
             if r2 > cutoff2 {
-                continue; // near-field trim => sparse
+                continue;
             }
             let r = r2.sqrt();
             let g = (i_unit * opts.k * r).exp() / (4.0 * std::f64::consts::PI * r);
             let dot = dx[0] * ni[0] + dx[1] * ni[1] + dx[2] * ni[2];
-            // dG/dn_i = G (ik - 1/r) (dx*n_i)/r
             let a = g * (i_unit * opts.k - Complex::new(1.0 / r, 0.0)) * Complex::new(dot / r, 0.0);
             rows.push(i);
             cols.push(j);
@@ -126,8 +120,6 @@ pub fn near_field<T: Scalar>(n: usize, per_col: usize, spread: f64, seed: u64) -
     let radius: Vec<f64> = (0..n)
         .map(|_| r0 * (1.0 + spread * (rng.unit() - 0.5)))
         .collect();
-    // Points binned into square cells of the largest radius: a column's
-    // near points lie in its own cell and the eight around it.
     let rmax = radius
         .iter()
         .fold(0.0f64, |a, &b| a.max(b))
@@ -169,7 +161,6 @@ pub fn near_field<T: Scalar>(n: usize, per_col: usize, spread: f64, seed: u64) -
         }
         out.sort_unstable();
     };
-    // A generator: every section as wide as the pool.
     let all = crate::parallel::Work::ns(f64::INFINITY);
     let counts =
         crate::parallel::map_init::<crate::parallel::Rayon, _, _>(n, all, Vec::new, |buf, j| {
@@ -211,12 +202,10 @@ mod tests {
     fn kernel_is_unsymmetric_and_sparse() {
         let a = kernel(500, &BemOpts::default());
         assert_eq!(a.n, 500);
-        // Near-field trim => far from dense.
         assert!(
             a.values.len() < 500 * 500 / 4,
             "near-field trim keeps it sparse"
         );
-        // Check A_ij != A_ji for some off-diagonal pair (double-layer asymmetry).
         let mut asym = false;
         for j in 0..a.n {
             for k in a.col_ptr[j]..a.col_ptr[j + 1] {
@@ -224,7 +213,6 @@ mod tests {
                 if i == j {
                     continue;
                 }
-                // find A_ji
                 let ji = (a.col_ptr[i]..a.col_ptr[i + 1]).find(|&t| a.row_idx[t] == j);
                 if let Some(t) = ji {
                     if (a.values[k] - a.values[t]).norm() > 1e-9 {

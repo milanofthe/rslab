@@ -5,7 +5,6 @@
 //! follows LAPACK `xLATMS`: build `A = Q Lambda Q^T` with a *prescribed* spectrum, so the
 //! condition number is **exact** - the right tool for accuracy/stability tests.
 //! `QLambdaQ^T` is dense, so this family is small-`n` by nature.
-// Diagonal/triplet loops use the index as a value (push `k`, read `colsum[k]`).
 #![allow(clippy::needless_range_loop)]
 
 use crate::scalar::Scalar;
@@ -28,7 +27,7 @@ pub fn random_spd<T: Scalar>(n: usize, avg_deg: usize, alpha: f64, seed: u64) ->
         for _ in 0..per {
             let j = (rng.next_u64() as usize) % n;
             if j >= i {
-                continue; // lower triangle only (j < i)
+                continue;
             }
             let w = rng.range(-1.0, 1.0);
             rows.push(i);
@@ -82,7 +81,6 @@ pub fn random_unsym<T: Scalar>(n: usize, avg_deg: usize, alpha: f64, seed: u64) 
 /// orthogonal matrix (Givens sweeps). Dense => keep `n` small (<= ~500).
 pub fn spectral<T: Scalar>(n: usize, kappa: f64, indefinite: bool, seed: u64) -> CscMatrix<T> {
     let mut rng = Rng::new(seed);
-    // Log-spaced eigenvalues with exact endpoints 1 and kappa.
     let mut eig = vec![1.0f64; n];
     let lk = kappa.max(1.0).log10();
     for (i, e) in eig.iter_mut().enumerate() {
@@ -101,7 +99,6 @@ pub fn spectral<T: Scalar>(n: usize, kappa: f64, indefinite: bool, seed: u64) ->
             *e = -*e;
         }
     }
-    // Random orthogonal Q (start at I, apply Givens row-rotations).
     let mut q = vec![0.0f64; n * n];
     for i in 0..n {
         q[i * n + i] = 1.0;
@@ -124,7 +121,6 @@ pub fn spectral<T: Scalar>(n: usize, kappa: f64, indefinite: bool, seed: u64) ->
             q[r * n + col] = sn * a + cs * b;
         }
     }
-    // A = Q diag(eig) Q^T, lower triangle.
     let mut rows = Vec::with_capacity(n * (n + 1) / 2);
     let mut cols = Vec::with_capacity(n * (n + 1) / 2);
     let mut vals = Vec::with_capacity(n * (n + 1) / 2);
@@ -155,15 +151,11 @@ mod tests {
     }
 
     #[test]
-    fn spectral_has_exact_condition_number() {
-        // A = QLambdaQ^T => eigenvalues are exactly Lambda; verify via the extreme Rayleigh
-        // quotients along the eigenvectors is hard from CSC, so check the trace
-        // (= sumlambda) and that the matrix is symmetric & sized right instead.
+    fn spectral_preserves_the_trace_of_its_spectrum() {
         let n = 50;
         let kappa = 1e6;
         let a = spectral::<f64>(n, kappa, false, 3);
         assert_eq!(a.n, n);
-        // Trace = sum eig (log-spaced 1..kappa). Lower-triangle diagonal entries.
         let mut trace = 0.0;
         for j in 0..n {
             for k in a.col_ptr[j]..a.col_ptr[j + 1] {
@@ -177,7 +169,6 @@ mod tests {
         for i in 0..n {
             eigsum += 10f64.powf(i as f64 / (n - 1) as f64 * lk);
         }
-        // endpoint correction
         eigsum += kappa - 10f64.powf(lk);
         let rotations = 3 * n;
         let bound = gamma(3 * n, U64) + givens_drift(rotations);
