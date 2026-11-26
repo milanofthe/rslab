@@ -296,37 +296,25 @@ mod tests {
         assert_eq!(separator_weight(&g, &labels), 3);
     }
 
-    fn path(n: usize) -> Graph {
+    /// The graph on `n` vertices with the given edges (plus the diagonal).
+    fn graph(n: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> Graph {
         let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
-        for i in 0..n.saturating_sub(1) {
-            t.push((i, i + 1));
-        }
+        t.extend(edges);
         let (cp, ri) = csc_from_triples(n, &t);
         let pat = CscPattern::new(n, &cp, &ri).unwrap();
         Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    fn path(n: usize) -> Graph {
+        graph(n, (0..n.saturating_sub(1)).map(|i| (i, i + 1)))
     }
 
     fn cycle(n: usize) -> Graph {
-        let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
-        for i in 0..n {
-            t.push((i, (i + 1) % n));
-        }
-        let (cp, ri) = csc_from_triples(n, &t);
-        let pat = CscPattern::new(n, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
+        graph(n, (0..n).map(|i| (i, (i + 1) % n)))
     }
 
     fn complete_bipartite(m: usize, k: usize) -> Graph {
-        let n = m + k;
-        let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
-        for i in 0..m {
-            for j in m..n {
-                t.push((i, j));
-            }
-        }
-        let (cp, ri) = csc_from_triples(n, &t);
-        let pat = CscPattern::new(n, &cp, &ri).unwrap();
-        Graph::from_csc_pattern(&pat).unwrap()
+        graph(m + k, (0..m).flat_map(|i| (m..m + k).map(move |j| (i, j))))
     }
 
     #[test]
