@@ -47,14 +47,14 @@ pub struct SsKluResult {
 }
 
 type SsKluFn = unsafe extern "C" fn(
-    i32,        // n
-    *const i32, // Ap
-    *const i32, // Ai
-    *const f64, // Ax
-    *const f64, // b
-    *mut f64,   // x
-    i32,        // sweep_len
-    *mut SsKluResult,
+    n: i32,
+    ap: *const i32,
+    ai: *const i32,
+    ax: *const f64,
+    b: *const f64,
+    x: *mut f64,
+    sweep_len: i32,
+    out: *mut SsKluResult,
 ) -> i32;
 
 pub struct SsKlu {
@@ -62,7 +62,6 @@ pub struct SsKlu {
     f: SsKluFn,
 }
 
-/// `(compile ok, shim path)` or `None` when no prefix/compiler is available.
 fn build_shim() -> Option<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = root.join("benches/klu_shim.c");
@@ -100,7 +99,6 @@ fn build_shim() -> Option<std::path::PathBuf> {
         cmd.args(["-O2", "-std=c11", shared_flag])
             .arg(format!("-I{prefix}/include/suitesparse"));
         if cfg!(target_os = "windows") {
-            // MinGW links straight against the DLL; no import lib needed.
             cmd.arg(&src).arg(format!("{prefix}/bin/klu.dll"));
         } else {
             cmd.arg(format!("-L{prefix}/lib")).arg("-lklu").arg(&src);
@@ -115,7 +113,6 @@ fn build_shim() -> Option<std::path::PathBuf> {
         }
     }
     if cfg!(target_os = "windows") {
-        // Make klu.dll and its dependencies resolvable when the shim loads.
         let path = std::env::var("PATH").unwrap_or_default();
         let bin = format!("{prefix}\\bin");
         if !path.split(';').any(|p| p.eq_ignore_ascii_case(&bin)) {
