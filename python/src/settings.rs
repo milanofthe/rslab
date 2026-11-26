@@ -136,7 +136,6 @@ fn amalgamation_name(s: AmalgamationStrategy) -> &'static str {
     }
 }
 
-/// A human word for the expected type of a knob.
 fn kind(ty: &str) -> &'static str {
     match ty {
         "bool" => "a bool",
@@ -377,7 +376,6 @@ pub struct PySettings {
     pub inner: SolverSettings,
     /// `threads=` was given: an explicit count beats the calibrated pick.
     pub explicit_threads: bool,
-    /// The static-pivot floor, kept for `to_dict()` / `repr`.
     preconditioner: Option<f64>,
     force_accept: bool,
     interrupt: Option<PyInterrupt>,
@@ -483,7 +481,6 @@ impl PySettings {
     }
 }
 
-/// A `threads=` value: an int, 'auto', ('auto', max) or 'ambient'.
 fn parse_threads(key: &str, v: &Bound<'_, PyAny>) -> PyResult<Threads> {
     const EXPECTED: &str = "an int, 'auto', ('auto', max) or 'ambient'";
     if let Ok(n) = v.extract::<usize>() {
@@ -502,7 +499,6 @@ fn parse_threads(key: &str, v: &Bound<'_, PyAny>) -> PyResult<Threads> {
     }
 }
 
-/// `threads` as the keyword takes it; `None` for the default unless given.
 fn threads_value(py: Python<'_>, threads: Threads, explicit: bool) -> PyObject {
     match threads {
         Threads::Fixed(n) => n.into_py(py),
@@ -622,7 +618,6 @@ impl PySettings {
 pub struct PyKluSettings {
     pub inner: rslab::KluSettings,
     interrupt: Option<PyInterrupt>,
-    /// `threads=` was given.
     explicit_threads: bool,
 }
 
