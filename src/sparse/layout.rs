@@ -207,26 +207,6 @@ impl CscLayout {
         }
     }
 
-    /// [`scatter`](Self::scatter) of values given as consecutive runs of the
-    /// entry order, each times its scale, and every entry after the runs at
-    /// `rest` (an augmentation such as a regularizing diagonal): the same
-    /// sums in the same order as scattering the concatenated values.
-    pub fn scatter_scaled<T: Scalar>(&self, parts: &[(&[T], T)], rest: T, out: &mut [T]) {
-        debug_assert_eq!(out.len(), self.row_idx.len());
-        out.fill(T::zero());
-        let mut k = 0;
-        for &(vals, scale) in parts {
-            for &v in vals {
-                let s = self.slot[k];
-                out[s] = out[s] + v * scale;
-                k += 1;
-            }
-        }
-        for &s in &self.slot[k..] {
-            out[s] = out[s] + rest;
-        }
-    }
-
     /// The layout's matrix with `values`, one per slot.
     pub fn matrix<T>(&self, values: Vec<T>) -> GeneralCsc<T> {
         debug_assert_eq!(values.len(), self.row_idx.len());
@@ -284,19 +264,6 @@ mod tests {
         let a = l.assemble(&[3.0, 1.0, 1.5, 0.5]);
         assert_eq!(a.values, vec![2.0, 1.0, 3.0]);
         a.validate().unwrap();
-    }
-
-    #[test]
-    fn scatter_scaled_matches_concatenated_scatter() {
-        let rows = [0, 1, 0, 0, 1];
-        let cols = [0, 1, 1, 0, 1];
-        let l = CscLayout::new(2, &rows, &cols).unwrap();
-        let (a, b) = ([1.0, 2.0], [3.0]);
-        let mut scaled = vec![0.0; l.nnz()];
-        l.scatter_scaled(&[(&a, 2.0), (&b, -1.0)], 0.25, &mut scaled);
-        let mut plain = vec![0.0; l.nnz()];
-        l.scatter(&[2.0, 4.0, -3.0, 0.25, 0.25], &mut plain);
-        assert_eq!(scaled, plain);
     }
 
     #[test]

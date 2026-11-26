@@ -190,7 +190,9 @@ pub(crate) mod memory;
 #[doc(hidden)]
 pub mod matgen;
 pub(crate) mod numeric;
+// Matrix families A0 + alpha*A1 + E on one layout.
 pub mod parallel;
+pub(crate) mod pencil;
 // Ordering internals the benches and tests reach by path.
 #[doc(hidden)]
 pub mod ordering;
@@ -240,6 +242,7 @@ pub use numeric::settings::{
     ZeroPivotAction,
 };
 pub use numeric::supernodal::solve::SparseReach;
+pub use pencil::{EntryRows, Pencil};
 // The Krylov solvers and their operator and preconditioner traits.
 pub use numeric::krylov::{
     cocg, cocr, gmres, gmres_block, gmres_recycled, BasisSwitch, BlockArnoldi, BlockBasis,
