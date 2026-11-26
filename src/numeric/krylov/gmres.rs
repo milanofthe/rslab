@@ -46,15 +46,10 @@ where
             got: b.len(),
         });
     }
-    // DGKS reorthogonalization: redo the projection only when a single MGS
-    // pass cancelled more than `reorth_eta` of the vector's length.
     let (tol, max_iter, reorth_eta) = (settings.tol, settings.max_iter, settings.reorth_eta);
-    // Flexible GMRES stores two bases, V and Z.
-    let m = settings.restart_for(n, 1, std::mem::size_of::<T>(), 2);
+    let flexible_bases = 2;
+    let m = settings.restart_for(n, 1, std::mem::size_of::<T>(), flexible_bases);
     let bnorm = norm2(b);
-    // Warm start: seed `x` from the caller's initial guess `x0`; the
-    // per-cycle true residual `r = b - A x` then measures progress from that
-    // guess. Convergence is still relative to ||b||. Absent `x0`, `x_0 = 0`.
     let mut x = match x0 {
         Some(g) => {
             if g.len() != n {
@@ -81,34 +76,14 @@ where
     let mut total = 0usize;
     let mut w = vec![T::zero(); n];
     let mut ax = vec![T::zero(); n];
-    // Arnoldi basis as one **flat** `n x (m+1)` buffer (column `i` is
-    // `v[i*n .. (i+1)*n]`) - contiguous, no per-iteration vector allocation, and
-    // cache-friendly for the Gram-Schmidt sweeps.
     let mut v = basis(n * (m + 1));
-    // FGMRES preconditioned basis `Z = [z_0 ... z_{m-1}]`, `z_j = M^-1 v_j` (issue
-    // #7): stored as it is computed so the restart update is `x += Z y` with no
-    // second preconditioner solve, and so a *variable* `M` is honoured exactly.
     let mut zb = basis(n * m);
-    // Per-restart Krylov scalars hoisted out of the outer loop and cleared/reused
-    // each cycle: the Hessenberg `h` as one **flat** `(m+1)xm` buffer
-    // (row `i`, col `j` at `h[i*m + j]` - cache-friendlier than a `Vec<Vec<T>>`),
-    // the Givens `cs`/`sn`, the LS RHS `g`, and the back-substitution `y`. A
-    // many-restart solve (the ill-conditioned regime) then does no per-cycle heap
-    // churn; the reused buffers are zeroed each cycle, so the numerics are
-    // bit-identical to a fresh allocation per cycle.
     let mut h = vec![T::zero(); (m + 1) * m];
     let mut cs = vec![T::zero(); m];
     let mut sn = vec![T::zero(); m];
     let mut g = vec![T::zero(); m + 1];
     let mut y = vec![T::zero(); m];
 
-    // Outer restart loop. Each pass first measures the TRUE residual ||b-Ax|| of the
-    // current iterate (the only reliable stop test on ill-conditioned MoM near-
-    // field operators, where the Hessenberg LS estimate can dip below `tol` while
-    // the true residual is orders larger) and records it as `final_res`. On
-    // convergence *or* exhausted iterations we break with that value already in
-    // hand - no separate post-loop matvec to report the residual.
-    // Definitely assigned before every `break` (the only exits from the loop).
     let mut final_res;
     loop {
         op.apply(&x, &mut ax);
@@ -118,8 +93,6 @@ where
         if final_res <= tol || total >= max_iter {
             break;
         }
-        // Column 0 of the basis = r / ||r||. Reset the reused Hessenberg / Givens /
-        // LS state to zero.
         let inv_beta = T::from_real(1.0 / beta);
         grow(&mut v, n);
         for k in 0..n {
@@ -143,18 +116,9 @@ where
             if total >= max_iter {
                 break;
             }
-            // Flexible right preconditioning: z_j = M^-1 v[j] (stored into the Z
-            // basis for the restart update), then w = A z_j.
             grow(&mut zb, (j + 1) * n);
             precond.apply(&v[j * n..j * n + n], &mut zb[j * n..j * n + n])?;
             op.apply(&zb[j * n..j * n + n], &mut w);
-            // Modified Gram-Schmidt against the existing basis, with **conditional**
-            // reorthogonalization (DGKS): the second pass - essential on
-            // ill-conditioned operators (MoM near-field) where a single MGS pass
-            // loses orthogonality and the Hessenberg residual estimate drifts from
-            // the true residual - runs only when the projection cancelled most of
-            // the vector (||w|| dropped below `eta*||w_0||`, eta = 1/sqrt2). Well-conditioned
-            // cycles skip it, halving the orthogonalization cost.
             let wnorm0 = norm2(&w);
             for i in 0..=j {
                 let hij = dotc(&v[i * n..i * n + n], &w);
@@ -182,19 +146,15 @@ where
                     v[(j + 1) * n + k] = w[k] * inv;
                 }
             } else {
-                // Invariant subspace: zero the (reused) basis column so a later
-                // sweep never reads stale data from a previous restart cycle.
                 for k in 0..n {
                     v[(j + 1) * n + k] = T::zero();
                 }
             }
-            // Apply previous rotations to the new Hessenberg column.
             for i in 0..j {
                 let temp = cs[i].conj() * h[i * m + j] + sn[i].conj() * h[(i + 1) * m + j];
                 h[(i + 1) * m + j] = -sn[i] * h[i * m + j] + cs[i] * h[(i + 1) * m + j];
                 h[i * m + j] = temp;
             }
-            // New rotation zeroing h[j+1][j]; apply to H and the LS RHS g.
             let (c, s) = givens(h[j * m + j], h[(j + 1) * m + j]);
             cs[j] = c;
             sn[j] = s;
@@ -205,16 +165,10 @@ where
             g[j + 1] = g_next;
             total += 1;
             jdim = j + 1;
-            // Early-exit the inner sweep on the LS estimate, but do **not** treat it
-            // as convergence: the outer loop's top-of-cycle TRUE-residual check is
-            // authoritative (the estimate can drift on ill-conditioned operators).
             if g[j + 1].magnitude() / bnorm <= tol {
                 break;
             }
         }
-        // Back-substitute the upper-triangular H for y on the well-conditioned
-        // leading block (breakdown guard), then (FGMRES) x += Z*y directly from the
-        // stored preconditioned basis - no second `M^-1` solve.
         let jd = well_conditioned_dim(&h, m, jdim);
         for i in (0..jd).rev() {
             let mut s = g[i];
@@ -236,8 +190,6 @@ where
         iters: total,
         converged: final_res <= tol,
         final_res,
-        // GMRES-family: converged (residual met, incl. happy breakdown) or the
-        // iteration budget ran out. No non-converged breakdown state.
         stop: if final_res <= tol {
             StopReason::Converged
         } else {

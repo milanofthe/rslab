@@ -40,10 +40,6 @@ impl<T: Scalar> LinearOperator<T> for CscMatrix<T> {
     fn apply(&self, x: &[T], y: &mut [T]) {
         self.symv(x, y);
     }
-    /// Amortized block symv: each lower-triangle entry `(i,j,v)` is loaded once
-    /// and scattered to all `s` columns (`y[:,c] += v*x[j,c]`, and symmetrically
-    /// `y[j,c] += v*x[i,c]` off the diagonal) - the BLAS-3 reuse a multi-RHS
-    /// solve buys over `s` separate `symv`s.
     fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
         let n = self.n;
         for v in y.iter_mut() {
@@ -77,8 +73,6 @@ impl<T: Scalar> LinearOperator<T> for GeneralCsc<T> {
     fn apply(&self, x: &[T], y: &mut [T]) {
         self.matvec(x, y);
     }
-    /// Amortized block matvec: each entry `(i,j,v)` is loaded once and applied to
-    /// all `s` columns (`y[i,c] += v*x[j,c]`).
     fn apply_block(&self, x: &[T], y: &mut [T], s: usize) {
         let n = self.n;
         for v in y.iter_mut() {
@@ -182,7 +176,6 @@ impl<F> MixedPrecision<F> {
     }
 }
 
-/// Run `solve` on `b` demoted to `H::Low` and promote its result.
 fn through_low<H: Scalar>(
     b: &[H],
     solve: impl FnOnce(&[H::Low]) -> Result<Vec<H::Low>, RslabError>,
@@ -209,7 +202,6 @@ impl<H: Scalar, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
     fn n(&self) -> usize {
         self.factor.n()
     }
-    /// One solve with the low-precision factor: accurate to its precision.
     fn solve(&self, b: &[H]) -> Result<Vec<H>, RslabError> {
         through_low(b, |b| self.factor.solve(b))
     }
@@ -219,11 +211,6 @@ impl<H: Scalar, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
     fn solve_transpose(&self, b: &[H]) -> Result<Vec<H>, RslabError> {
         through_low(b, |b| self.factor.solve_transpose(b))
     }
-    /// Mixed-precision iterative refinement: residuals against `a` (plus the
-    /// factor's pivot floors for [`RefineSystem::Factored`]) in `H`,
-    /// corrections from the low-precision factor.
-    ///
-    /// [`RefineSystem::Factored`]: crate::RefineSystem::Factored
     fn solve_refined(
         &self,
         a: &dyn crate::refine::RefineOperator<H>,
@@ -243,22 +230,18 @@ impl<H: Scalar, F: Factorization<H::Low>> Factorization<H> for MixedPrecision<F>
     fn n_perturbed(&self) -> usize {
         self.factor.n_perturbed()
     }
-    /// The low-precision factor's floors, promoted.
     fn perturbations(&self) -> std::borrow::Cow<'_, [crate::refine::PivotFloor<H>]> {
         let floors = self.factor.perturbations();
         floors.iter().map(|&f| f.promote()).collect()
     }
-    /// The determinant of the demoted matrix, to the low precision.
     fn log_det(&self) -> Result<(H, f64), RslabError> {
         let (phase, log_abs) = self.factor.log_det()?;
         Ok((H::promote(phase), log_abs))
     }
-    /// The determinant of the demoted matrix, to the low precision.
     fn det(&self) -> Result<H, RslabError> {
         let (phase, log_abs) = Factorization::<H>::log_det(self)?;
         Ok(phase * H::from_real(log_abs.exp()))
     }
-    /// The inverse of the demoted matrix, to the low precision.
     fn inverse(&self) -> Result<Vec<H>, RslabError> {
         through_low(&[], |_| self.factor.inverse())
     }
