@@ -12,7 +12,9 @@
 use num_complex::Complex64 as C;
 use rslab::{AutoSettings, AutoSymbolic, EntryRows, Pencil, Scalar};
 
-const DIAGONALLY_DOMINANT_GROWTH: f64 = 2.0;
+pub mod common;
+
+use common::constants::{gamma, DIAGONALLY_DOMINANT_GROWTH, U64};
 
 struct Family {
     n: usize,
@@ -89,9 +91,8 @@ fn check(a: &[C], n: usize, b: &[C], x: &[C], complex: bool, what: &str) {
     (0..n).for_each(|i| eye[i * n + i] = C::new(1.0, 0.0));
     let inv = rslab::dense::lu_solve(a, n, &eye, n).unwrap();
     let kappa = inf_norm(a, n) * inf_norm(&inv, n);
-    let u = f64::EPSILON / 2.0;
-    let m = (if complex { 2 * n } else { n }) as f64;
-    let bound = kappa * DIAGONALLY_DOMINANT_GROWTH * m * u / (1.0 - m * u);
+    let m = if complex { 2 * n } else { n };
+    let bound = kappa * DIAGONALLY_DOMINANT_GROWTH * gamma(m, U64);
     let inf = |v: &[C]| v.iter().map(|z| z.norm()).fold(0.0, f64::max);
     let diff: Vec<C> = x.iter().zip(&want).map(|(p, q)| p - q).collect();
     let err = inf(&diff) / inf(&want);

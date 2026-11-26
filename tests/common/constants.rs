@@ -36,6 +36,12 @@ pub fn solve_backward_error(n: usize, u: f64) -> f64 {
     LAPACK_THRESHOLD * n as f64 * u
 }
 
+/// Bound on the growth factor of Gaussian elimination with partial pivoting
+/// on a matrix that is diagonally dominant by rows or by columns: the entries
+/// of the reduced matrices are at most twice the largest entry of A in
+/// magnitude (Higham 2002, Thm. 9.9, after Wilkinson 1961).
+pub const DIAGONALLY_DOMINANT_GROWTH: f64 = 2.0;
+
 /// Bound on the relative normwise forward error ||x - x*|| / ||x*|| of a
 /// solution whose normwise backward error is at most omega, for a matrix with
 /// the condition number cond = ||A|| ||A^-1||. Perturbations ||dA|| <= omega

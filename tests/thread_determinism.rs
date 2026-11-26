@@ -14,14 +14,15 @@ use rslab::{
     OrderingMethod, Scalar, SolverSettings, Threads,
 };
 
-const DIAGONALLY_DOMINANT_GROWTH: f64 = 2.0;
+pub mod common;
+
+use common::constants::{gamma, DIAGONALLY_DOMINANT_GROWTH, U64};
 
 const THREADS: [usize; 3] = [1, 2, 8];
 
 fn bound<T: Scalar>(n: usize) -> f64 {
-    let u = f64::EPSILON / 2.0;
-    let m = (if T::COMPLEX { 2 * n } else { n }) as f64;
-    DIAGONALLY_DOMINANT_GROWTH * m * u / (1.0 - m * u)
+    let m = if T::COMPLEX { 2 * n } else { n };
+    DIAGONALLY_DOMINANT_GROWTH * gamma(m, U64)
 }
 
 fn backward_error<T: Scalar>(n: usize, entries: &[(usize, usize, T)], x: &[T], b: &[T]) -> f64 {

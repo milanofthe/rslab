@@ -27,8 +27,8 @@
 use super::factor::{factor_numeric, LdltNumeric};
 use super::pivots::LdltPivots;
 use crate::constants::{
-    IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY, LDLT_INPUT_BUILD_BYTES_PER_COL,
-    LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, SINGULAR_VALUE_DISCRIMINANT, VEC_HEADER_BYTES,
+    DISCRIMINANT_FACTOR, IDX32_BYTES, INPUT_PROGRAM_BYTES_PER_ENTRY,
+    LDLT_INPUT_BUILD_BYTES_PER_COL, LDLT_NODE_CELL_BYTES, LDLT_SCRATCH_POOLS, VEC_HEADER_BYTES,
     WORD_BYTES,
 };
 use crate::error::RslabError;
@@ -90,7 +90,7 @@ impl<T: Scalar> LdltSolver<T> {
                 let (a, b, c) = (f.d_diag[k], f.d_subdiag[k], f.d_diag[k + 1]);
                 let det = (a * c - b * b).magnitude();
                 let fro = a.magnitude_sq() + 2.0 * b.magnitude_sq() + c.magnitude_sq();
-                let disc = (fro * fro - SINGULAR_VALUE_DISCRIMINANT * det * det)
+                let disc = (fro * fro - DISCRIMINANT_FACTOR * det * det)
                     .max(0.0)
                     .sqrt();
                 let smax = ((fro + disc) / 2.0).sqrt();

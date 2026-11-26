@@ -52,9 +52,14 @@ pub const QR_EXCEPTIONAL_PERIOD: usize = 10;
 /// Contract: results (only where exceptional shifts are taken).
 pub const QR_EXCEPTIONAL_SHIFT: f64 = 0.75;
 
-/// The factor of `b c` in the discriminant `(a - d)^2 + 4 b c` of the
-/// characteristic polynomial of a `2x2` block `[[a, b], [c, d]]` (1).
-/// Used by: `dense_eig::wilkinson_shift`.
+/// The 4 of the discriminant `b^2 - 4 a c` of a quadratic `a x^2 + b x + c`
+/// (1).
+/// Used by: `dense_eig::wilkinson_shift` (the discriminant `(a - d)^2 + 4 b c`
+/// of the characteristic polynomial of a `2x2` block `[[a, b], [c, d]]`),
+/// `ldlt::solver` (the discriminant `fro^2 - 4 det^2` of
+/// `sigma^4 - fro sigma^2 + det^2 = 0`, whose roots are the squared singular
+/// values of a 2x2 pivot block of `D`, for the smallest pivot in the
+/// diagnostics).
 /// Why: the quadratic formula.
 /// Contract: definition.
 pub const DISCRIMINANT_FACTOR: f64 = 4.0;

@@ -151,12 +151,3 @@ pub const BK_ROW_BUFFERS: usize = 4;
 /// enough for the SIMD GEMM.
 /// Contract: rounding.
 pub const PANEL_BLOCK: usize = 64;
-
-/// The 4 of the discriminant `fro^2 - 4 det^2` of the quadratic
-/// `sigma^4 - fro sigma^2 + det^2 = 0` whose roots are the squared singular
-/// values of a 2x2 pivot block of `D`, `fro` its squared Frobenius norm and
-/// `det` the magnitude of its determinant.
-/// Used by: `ldlt::solver` (the smallest pivot in the diagnostics).
-/// Why: the discriminant `b^2 - 4ac` of a quadratic.
-/// Contract: estimate.
-pub const SINGULAR_VALUE_DISCRIMINANT: f64 = 4.0;
