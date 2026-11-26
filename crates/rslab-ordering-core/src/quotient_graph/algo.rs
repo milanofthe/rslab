@@ -123,9 +123,6 @@ pub fn create_element(
     let pme2: i32;
 
     if elenme == 0 {
-        // In-place: me has no elements in its list - just variables.
-        // Compact them at pe[me]: advance pme2 to the final position,
-        // overwriting absorbed entries in-place.
         let pme1_s = ws.pe[me];
         pme1 = pme1_s as usize;
         let list_start = pme1;
@@ -139,7 +136,6 @@ pub fn create_element(
                 ws.nv[i] = -nvi;
                 pme2_s += 1;
                 ws.iw[pme2_s as usize] = i as i32;
-                // Unlink i from its degree list.
                 let ilast = ws.last[i];
                 let inext = ws.next[i];
                 if inext != NONE {
@@ -154,10 +150,6 @@ pub fn create_element(
         }
         pme2 = pme2_s;
     } else {
-        // Out-of-place: start a new region at pfree. Walk every
-        // element e in me's list (first `elenme` entries of me's
-        // adjacency), then walk the variable tail (remaining
-        // `slenme` entries) with `knt1 = elenme + 1` as the flag.
         let mut p = ws.pe[me] as usize;
         let mut pme1_rw: usize = ws.pfree;
         let slenme = (ws.len[me] - elenme) as usize;
@@ -167,7 +159,6 @@ pub fn create_element(
             let mut pj: usize;
             let ln: usize;
             if knt1 > elenme_u {
-                // Variable tail of me's own list.
                 e = me;
                 pj = p;
                 ln = slenme;
@@ -183,10 +174,6 @@ pub fn create_element(
                 let nvi = ws.nv[i];
                 if nvi > 0 {
                     if ws.pfree >= ws.iwlen {
-                        // Inline garbage collection (faer
-                        // amd.rs:289-338). Save partial state so
-                        // the surviving elements can be compacted
-                        // down, then restore local cursors.
                         ws.pe[me] = p as i32;
                         ws.len[me] -= knt1 as i32;
                         if ws.len[me] == 0 {
@@ -198,10 +185,6 @@ pub fn create_element(
                             ws.pe[e] = NONE;
                         }
                         ws.ncmpa += 1;
-                        // Mark each live list's head: save iw[pe[j]]
-                        // into pe[j] and write flip(j) at the old
-                        // head position so the compact sweep can
-                        // recognise list starts.
                         for j in 0..ws.n {
                             let pn = ws.pe[j];
                             if pn >= 0 {
@@ -210,8 +193,6 @@ pub fn create_element(
                                 ws.iw[pn_u] = flip(j as i32);
                             }
                         }
-                        // Sweep [0, pme1_rw), reconstructing every
-                        // marked list contiguously at pdst.
                         let mut psrc = 0usize;
                         let mut pdst = 0usize;
                         let pend = pme1_rw;
@@ -231,15 +212,11 @@ pub fn create_element(
                                 }
                             }
                         }
-                        // Slide the new element's accumulated prefix
-                        // [pme1_rw, pfree) down to the new pdst.
                         let p1 = pdst;
                         ws.iw.copy_within(pme1_rw..ws.pfree, pdst);
                         pdst += ws.pfree - pme1_rw;
                         pme1_rw = p1;
                         ws.pfree = pdst;
-                        // Restore local cursors from the relocated
-                        // heads of e's and me's lists.
                         pj = ws.pe[e] as usize;
                         p = ws.pe[me] as usize;
                     }
@@ -247,7 +224,6 @@ pub fn create_element(
                     ws.nv[i] = -nvi;
                     ws.iw[ws.pfree] = i as i32;
                     ws.pfree += 1;
-                    // Unlink i from its degree list.
                     let ilast = ws.last[i];
                     let inext = ws.next[i];
                     if inext != NONE {
@@ -260,8 +236,6 @@ pub fn create_element(
                     }
                 }
             }
-            // Standard absorption (amd.rs:355-358): every element e
-            // that was in me's list is now absorbed by me.
             if e != me {
                 ws.pe[e] = flip(me as i32);
                 ws.w[e] = 0;
@@ -277,11 +251,6 @@ pub fn create_element(
     ws.elen[me] = flip(nvpiv + degme as i32);
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
-    // Convert the inclusive `pme2` (which is `pme1 - 1` when the
-    // pivot's variable list ended up empty - every neighbour was
-    // already absorbed) to an exclusive end so downstream loops can
-    // use a `usize` half-open range without the wrap-around bug
-    // `(-1i32) as usize == usize::MAX`.
     let pme2_excl: usize = if pme2 < pme1 as i32 {
         pme1
     } else {
@@ -340,7 +309,6 @@ pub fn finalize_step(
     let mut degme = degme;
     let mut nvpiv = nvpiv;
 
-    // Pass 1: seed w[e] for every element in each member's list.
     for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let eln = ws.elen[i];
@@ -361,23 +329,14 @@ pub fn finalize_step(
         }
     }
 
-    // Pass 2: approximate degree, (optionally) aggressive absorption,
-    // mass elimination (faer amd.rs:436-444), and hash-bucket
-    // insertion for supervariable detection (amd.rs:451-460). `degme`
-    // and `nvpiv` are mutated when mass-elim fires; the post-loop
-    // degree/flop bookkeeping uses the updated values.
     for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let p1 = ws.pe[i] as usize;
         let p2 = p1 + ws.elen[i] as usize;
         let mut pn = p1;
         let mut deg: usize = 0;
-        // Hash accumulator for supervariable detection (faer
-        // amd.rs:419,433). Both elements AND variables in the kept
-        // neighbourhood contribute.
         let mut hash: usize = 0;
 
-        // Element sub-pass.
         if aggressive {
             for p in p1..p2 {
                 let e = ws.iw[p] as usize;
@@ -390,8 +349,6 @@ pub fn finalize_step(
                         pn += 1;
                         hash = hash.wrapping_add(e);
                     } else {
-                        // Aggressive absorption: dead element folded
-                        // into me right here (faer amd.rs:404-407).
                         ws.pe[e] = flip(me as i32);
                         ws.w[e] = 0;
                     }
@@ -402,11 +359,6 @@ pub fn finalize_step(
                 let e = ws.iw[p] as usize;
                 let we = ws.w[e];
                 if we != 0 {
-                    // Invariant: a live element in the non-aggressive pass
-                    // always has `we >= ws.wflg`, so the difference is
-                    // non-negative. Guard the unchecked `as usize` cast - a
-                    // future regression that broke the invariant would
-                    // sign-extend a negative difference to ~2^64 here.
                     debug_assert!(
                         we >= ws.wflg,
                         "stale mark: w[e]={we} < wflg={} would wrap as usize",
@@ -421,12 +373,9 @@ pub fn finalize_step(
             }
         }
 
-        // Record number-of-elements + 1 (the +1 reserves the slot
-        // for `me` which we insert at p1 below).
         ws.elen[i] = (pn - p1 + 1) as i32;
         let p3 = pn;
         let p4 = p1 + ws.len[i] as usize;
-        // Variable sub-pass.
         for p in p2..p4 {
             let j = ws.iw[p] as usize;
             let nvj = ws.nv[j];
@@ -439,10 +388,6 @@ pub fn finalize_step(
         }
 
         if ws.elen[i] == 1 && p3 == pn {
-            // Mass elimination: i's only element is `me` and it has
-            // no surviving outside variables, so it will pivot
-            // concurrently with me. Fold its supervariable count
-            // into nvpiv / nel and drop it from degme.
             ws.pe[i] = flip(me as i32);
             let nvi = -ws.nv[i];
             debug_assert!(nvi >= 0);
@@ -454,7 +399,6 @@ pub fn finalize_step(
             ws.n_mass_elim += 1;
         } else {
             ws.degree[i] = ws.degree[i].min(deg as i32);
-            // Swap-dance to put `me` at the head of i's element list.
             if p1 != pn {
                 ws.iw[pn] = ws.iw[p3];
             }
@@ -464,17 +408,6 @@ pub fn finalize_step(
             ws.iw[p1] = me as i32;
             ws.len[i] = (pn - p1 + 1) as i32;
 
-            // Insert i into a hash bucket threaded through
-            // head/next/last via sign-bit encoding (faer
-            // amd.rs:452-460). `head[hash] <= NONE` distinguishes
-            // two cases:
-            //  * NONE (-1) or flip(prev_head)<=-2 mean the bucket
-            //    is either empty or already a flip-encoded bucket
-            //    chain: next[i]=flip(old), head[hash]=flip(i).
-            //  * j>=0 means head[hash] still holds an unrelated
-            //    degree-list head. Hijack last[j] to chain
-            //    bucket members (last[j] is NONE for a list head,
-            //    so no information is destroyed).
             let h = hash % ws.n;
             let j = ws.head[h];
             if j <= NONE {
@@ -488,8 +421,6 @@ pub fn finalize_step(
         }
     }
 
-    // Step bookkeeping (amd.rs:463-466). degme may have been reduced
-    // by mass elimination above.
     let degme_i32 = degme as i32;
     ws.degree[me] = degme_i32;
     if degme_i32 > ws.lemax {
@@ -498,31 +429,19 @@ pub fn finalize_step(
     ws.wflg += ws.lemax;
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
-    // Supervariable detection (faer amd.rs:467-515). For each hash
-    // chain anchored at a still-marked member (nv[i] < 0), walk the
-    // chain marking i's variable neighbourhood with `wflg`, then
-    // compare each follower j to i: if len/elen agree AND every
-    // variable neighbour of j is also marked, merge j into i.
-    //
-    // head / next / last are being reused here as hash-bucket
-    // storage; they are restored to NONE at the heads involved so
-    // the subsequent degree-list re-insertion pass can rebuild the
-    // degree buckets cleanly.
     for pme in pme1..pme2_excl {
         let i_anchor = ws.iw[pme] as usize;
         if ws.nv[i_anchor] >= 0 {
-            continue; // already restored / mass-elim'd
+            continue;
         }
         let h = ws.last[i_anchor] as usize;
         let j_head = ws.head[h];
         let mut i: i32 = if j_head == NONE {
             NONE
         } else if j_head < NONE {
-            // Bucket was flip-encoded: flip(j_head) is the head.
             ws.head[h] = NONE;
             flip(j_head)
         } else {
-            // Bucket chained via last[j_head]; restore last[j_head].
             let chain_start = ws.last[j_head as usize];
             ws.last[j_head as usize] = NONE;
             chain_start
@@ -532,7 +451,6 @@ pub fn finalize_step(
             let ln = ws.len[i_u];
             let eln = ws.elen[i_u];
             let pi = ws.pe[i_u];
-            // Mark i's neighbourhood (everything past slot pe[i]=me).
             for p in (pi + 1) as usize..(pi + ln) as usize {
                 ws.w[ws.iw[p] as usize] = ws.wflg;
             }
@@ -551,8 +469,6 @@ pub fn finalize_step(
                     }
                 }
                 if ok {
-                    // Merge j into i: j becomes a degree-0 ghost
-                    // pointing at i via pe[j] = flip(i).
                     ws.pe[jj] = flip(i);
                     ws.nv[i_u] += ws.nv[jj];
                     ws.nv[jj] = 0;
@@ -565,16 +481,11 @@ pub fn finalize_step(
                     jp = ws.next[jj];
                 }
             }
-            // Bump wflg to reset marks for the next chain head.
             ws.wflg += 1;
             i = ws.next[i_u];
         }
     }
 
-    // Re-insertion (amd.rs:516-537): every surviving var in the new
-    // element list gets its new degree, is pushed onto head[deg]
-    // LIFO, and me's own list is compacted down to just the
-    // survivors.
     let mut p_write = pme1;
     let nleft = ws.n - ws.nel;
     for pme in pme1..pme2_excl {
@@ -603,7 +514,6 @@ pub fn finalize_step(
         }
     }
 
-    // Me bookkeeping (amd.rs:538-546).
     ws.nv[me] = nvpiv;
     ws.len[me] = (p_write as i32) - pme1 as i32;
     if ws.len[me] == 0 {
@@ -614,11 +524,12 @@ pub fn finalize_step(
         ws.pfree = p_write;
     }
 
-    // Flop counters (amd.rs:547-557).
     let f = nvpiv as f64;
     let r = degme_i32 as f64 + ws.ndense as f64;
     let lnzme = f * r + (f - 1.0) * f / 2.0;
-    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
+    let s = f * r * r
+        + r * (f - 1.0) * f
+        + (f - 1.0) * f * (2.0 * f - 1.0) / crate::constants::SUM_OF_SQUARES_DIV;
 
     StepFlops {
         ndiv: lnzme,
@@ -627,11 +538,6 @@ pub fn finalize_step(
     }
 }
 
-/// AMF bucket index for a quantized fill score (`MinFill::bucket`).
-///
-/// Mirrors the metric trait's `MinFill::bucket` but is duplicated as a
-/// free function here so `algo.rs` does not need a back-edge to
-/// `metric.rs` (which itself imports from `algo`). Inlined.
 #[inline(always)]
 fn amf_bucket_of(score: i64, n: usize) -> usize {
     if score <= 0 {
@@ -646,36 +552,16 @@ fn amf_bucket_of(score: i64, n: usize) -> usize {
     ((s - n) / pas + n).min(nbbuck)
 }
 
-/// AMF working-fill *surface contribution* of an element with current
-/// external degree `dext` and total degree `degree`:
-/// `dext * (2*degree - dext - 1)` (Amestoy 1999 thesis; the HAMF4
-/// variant of the formula).
-///
-/// Computed in `i64`: both factors are `O(n)`, so the product reaches
-/// ~`n^2` and overflows `i32` for `n` >~ 46k (`i32::MAX` is
-/// 2_147_483_647 and `46342 * 46341 = 2_147_534_622` already exceeds
-/// it). In `i32` it would wrap silently in release, feeding garbage
-/// into the RMF pivot score, and panic in debug. The value is later
-/// consumed as `f64`, so widening loses no precision.
 #[inline(always)]
 fn amf_wf_surface(dext: i64, degree: i64) -> i64 {
     dext * (2 * degree - dext - 1)
 }
 
-/// AMF per-supervariable working-fill accumulation
-/// `wf4 + 2 * nvi * wf3` (Amestoy 1999 eq. for the B3 contribution,
-/// HAMF4 variant). Computed in `i64` for the same
-/// `O(n^2)` overflow reason as [`amf_wf_surface`]: `nvi` (supervariable
-/// size) and `wf3` (sum of neighbour supervariable sizes) are each
-/// `O(n)`.
 #[inline(always)]
 fn amf_wf_combine(wf4: i64, nvi: i64, wf3: i64) -> i64 {
     wf4 + 2 * nvi * wf3
 }
 
-/// Saturation cap used when quantizing the AMF RMF score into `i32`:
-/// one below the type maximum, so the saturated value still sorts
-/// strictly below untouchable sentinels (matches HAMF4 semantics).
 const AMF_DUMMY_I32: i32 = i32::MAX - 1;
 
 /// AMF analogue of [`select_pivot`]. Linear-scans coarse buckets
@@ -700,7 +586,6 @@ pub fn select_pivot_amf(ws: &mut Workspace) -> Option<usize> {
 
     let me;
     if deg > n {
-        // Coarse bucket: linear scan for the minimum-score entry.
         let mut best = head_me;
         let mut best_score = ws.wf[best];
         let mut j = ws.next[best];
@@ -713,7 +598,6 @@ pub fn select_pivot_amf(ws: &mut Workspace) -> Option<usize> {
             j = ws.next[ju];
         }
         me = best;
-        // Doubly-linked unlink (best may be mid-chain).
         let ilast = ws.last[me];
         let inext = ws.next[me];
         if inext != NONE {
@@ -928,8 +812,6 @@ pub fn finalize_step_amf(
     let mut degme = degme;
     let mut nvpiv = nvpiv;
 
-    // Pass 1: seed w[e] for every element in each member's list, and
-    // reset wf[e] = 0 on the first touch (lazy cache for Pass-2).
     for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let eln = ws.elen[i];
@@ -944,26 +826,6 @@ pub fn finalize_step_amf(
                     we -= nvi;
                 } else if we != 0 {
                     we = ws.degree[e] + wnvi;
-                    // `wf[e] = 0` is the
-                    // lazy-cache "surface not yet computed this iteration"
-                    // sentinel for Pass-2 below. It is intentionally NOT
-                    // distinct from a genuine surface contribution of 0:
-                    // `amf_wf_surface(dext, deg) = dext*(2*deg - dext - 1)`
-                    // is 0 for a live element whenever `dext == 2*deg(e)-1`
-                    // (e.g. dext=1, deg=1). When that happens `wf[e]` stays
-                    // 0, so the Pass-2 `if wf[e] == 0` check re-treats it as
-                    // uncached and recomputes the surface for every member
-                    // that touches `e`. This is benign: `amf_wf_surface` is
-                    // pure in (dext, degree[e]) - both stable across one
-                    // Pass-2 - so the recompute yields the same 0 and the
-                    // accumulated `wf4` (hence the RMF score and the
-                    // permutation) is unchanged; only a few integer multiplies
-                    // are redundant. A distinguishing sentinel (e.g. -1) was
-                    // rejected: `wf` is reused for variable scores
-                    // (supervariable-merge `max`, re-insertion bucket
-                    // quantization), so -1 would have to be proven never to
-                    // leak into either across the AMD and AMF paths - added
-                    // correctness risk for a handful of saved ops.
                     ws.wf[e] = 0;
                 }
                 ws.w[e] = we;
@@ -971,8 +833,6 @@ pub fn finalize_step_amf(
         }
     }
 
-    // Pass 2: AMF triple-accumulator (deg, wf3, wf4), aggressive
-    // absorption on dext == 0, mass elimination, hash-bucket insert.
     for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let p1 = ws.pe[i] as usize;
@@ -984,7 +844,6 @@ pub fn finalize_step_amf(
         let mut wf4: i64 = 0;
         let nvi = -ws.nv[i];
 
-        // Element sub-pass.
         if aggressive {
             for p in p1..p2 {
                 let e = ws.iw[p] as usize;
@@ -992,12 +851,7 @@ pub fn finalize_step_amf(
                 if we != 0 {
                     let dext = we - ws.wflg;
                     if dext > 0 {
-                        // `wf[e] == 0` means "uncached this iter" OR a genuine
-                        // 0 surface - recompute on the latter is benign
-                        // (same value). See the Pass-1 reset comment above.
                         if ws.wf[e] == 0 {
-                            // First touch this iter: cache the surface
-                            // contribution dext*(2*deg(e) - dext - 1).
                             ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
                         }
                         wf4 += ws.wf[e];
@@ -1006,7 +860,6 @@ pub fn finalize_step_amf(
                         pn += 1;
                         hash = hash.wrapping_add(e);
                     } else {
-                        // Aggressive absorption.
                         ws.pe[e] = flip(me as i32);
                         ws.w[e] = 0;
                     }
@@ -1018,18 +871,11 @@ pub fn finalize_step_amf(
                 let we = ws.w[e];
                 if we != 0 {
                     let dext = we - ws.wflg;
-                    // Invariant: non-aggressive pass keeps `we >= ws.wflg`,
-                    // so `dext >= 0`. Guard the `dext as usize` cast below
-                    // against a future regression wrapping a negative dext to
-                    // ~2^64.
                     debug_assert!(
                         dext >= 0,
                         "stale mark: w[e]={we} < wflg={} would wrap as usize",
                         ws.wflg
                     );
-                    // `wf[e] == 0` means "uncached this iter" OR a genuine 0
-                    // surface - recompute on the latter is benign (same
-                    // value). See the Pass-1 reset comment above.
                     if ws.wf[e] == 0 {
                         ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
                     }
@@ -1045,7 +891,6 @@ pub fn finalize_step_amf(
         ws.elen[i] = (pn - p1 + 1) as i32;
         let p3 = pn;
         let p4 = p1 + ws.len[i] as usize;
-        // Variable sub-pass.
         for p in p2..p4 {
             let j = ws.iw[p] as usize;
             let nvj = ws.nv[j];
@@ -1059,8 +904,6 @@ pub fn finalize_step_amf(
         }
 
         if ws.elen[i] == 1 && p3 == pn {
-            // Mass elimination (equivalent to MUMPS DEG==0 in
-            // aggressive / non-halo mode).
             ws.pe[i] = flip(me as i32);
             let nvi_sv = -ws.nv[i];
             debug_assert!(nvi_sv >= 0);
@@ -1071,20 +914,14 @@ pub fn finalize_step_amf(
             ws.elen[i] = NONE;
             ws.n_mass_elim += 1;
         } else {
-            // Loose-degree special case: if the prior degree estimate
-            // is already tighter, keep it but the WF accumulator is
-            // not subtraction-safe - zero it.
             if ws.degree[i] < deg as i32 {
                 wf3 = 0;
                 wf4 = 0;
             } else {
                 ws.degree[i] = deg as i32;
             }
-            // wf[i] = wf4 + 2 * nvi * wf3 (Amestoy 1999 eq. for B3
-            // contribution; HAMF4 loose-degree rule).
             ws.wf[i] = amf_wf_combine(wf4, nvi as i64, wf3);
 
-            // Swap-dance to put `me` at the head of i's element list.
             if p1 != pn {
                 ws.iw[pn] = ws.iw[p3];
             }
@@ -1094,9 +931,6 @@ pub fn finalize_step_amf(
             ws.iw[p1] = me as i32;
             ws.len[i] = (pn - p1 + 1) as i32;
 
-            // Hash-bucket insertion (sign-bit encoding identical to
-            // AMD; head reuse is safe because hash mod n falls in
-            // the fine bucket region [0, n)).
             let h = hash % n;
             let j = ws.head[h];
             if j <= NONE {
@@ -1118,8 +952,6 @@ pub fn finalize_step_amf(
     ws.wflg += ws.lemax;
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
-    // Supervariable detection. Identical to AMD except merge updates
-    // wf[i] = max(wf[i], wf[j]).
     for pme in pme1..pme2_excl {
         let i_anchor = ws.iw[pme] as usize;
         if ws.nv[i_anchor] >= 0 {
@@ -1161,7 +993,6 @@ pub fn finalize_step_amf(
                 }
                 if ok {
                     ws.pe[jj] = flip(i);
-                    // AMF merge: wf takes the max of the two scores.
                     let wf_j = ws.wf[jj];
                     if wf_j > ws.wf[i_u] {
                         ws.wf[i_u] = wf_j;
@@ -1182,7 +1013,6 @@ pub fn finalize_step_amf(
         }
     }
 
-    // Re-insertion: AMF saturated/regular RMF, quantize, bucket.
     let dummy_f = AMF_DUMMY_I32 as f64;
     let n_f = if n == 0 { 1.0 } else { n as f64 };
     let mut p_write = pme1;
@@ -1196,7 +1026,6 @@ pub fn finalize_step_amf(
             let nvi_i = nvi;
             let deg_i = ws.degree[i];
             let rmf = if (deg_i as usize) + (degme_i as usize) > nleft {
-                // Saturated branch. RMF1 uses original DEG.
                 let deg_f = deg_i as f64;
                 let rmf1 = deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64;
                 let new_deg = (nleft as i32) - nvi_i;
@@ -1236,7 +1065,6 @@ pub fn finalize_step_amf(
         }
     }
 
-    // Me bookkeeping (same as AMD).
     ws.nv[me] = nvpiv;
     ws.len[me] = (p_write as i32) - pme1 as i32;
     if ws.len[me] == 0 {
@@ -1247,11 +1075,12 @@ pub fn finalize_step_amf(
         ws.pfree = p_write;
     }
 
-    // Flop counters (identical to AMD).
     let f = nvpiv as f64;
     let r = degme_i32 as f64 + ws.ndense as f64;
     let lnzme = f * r + (f - 1.0) * f / 2.0;
-    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
+    let s = f * r * r
+        + r * (f - 1.0) * f
+        + (f - 1.0) * f * (2.0 * f - 1.0) / crate::constants::SUM_OF_SQUARES_DIV;
 
     StepFlops {
         ndiv: lnzme,
@@ -1284,7 +1113,7 @@ pub fn run_elimination_amf(
     eliminated.finish();
     let f = ws.ndense as f64;
     let lnzme = (f - 1.0) * f / 2.0;
-    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
+    let s = (f - 1.0) * f * (2.0 * f - 1.0) / crate::constants::SUM_OF_SQUARES_DIV;
     flops.ndiv += lnzme;
     flops.nms_lu += s;
     flops.nms_ldl += (s + lnzme) / 2.0;
@@ -1316,7 +1145,7 @@ pub fn run_elimination(
     while ws.nel < ws.n {
         let me = match select_pivot(ws) {
             Some(m) => m,
-            None => break, // only dense-deferred survivors remain
+            None => break,
         };
         let (elenme, before) = (ws.elen[me], ws.nel);
         let (pme1, pme2, nvpiv, degme) = create_element(ws, me)?;
@@ -1326,10 +1155,9 @@ pub fn run_elimination(
         eliminated.add(ws.nel - before);
     }
     eliminated.finish();
-    // Dense-phase flop contribution (amd.rs:559-566).
     let f = ws.ndense as f64;
     let lnzme = (f - 1.0) * f / 2.0;
-    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0; // lit: sum of squares
+    let s = (f - 1.0) * f * (2.0 * f - 1.0) / crate::constants::SUM_OF_SQUARES_DIV;
     flops.ndiv += lnzme;
     flops.nms_lu += s;
     flops.nms_ldl += (s + lnzme) / 2.0;
@@ -1368,7 +1196,6 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
         return Vec::new();
     }
 
-    // Step 1: un-flip.
     for x in ws.pe.iter_mut() {
         *x = flip(*x);
     }
@@ -1376,7 +1203,6 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
         *x = flip(*x);
     }
 
-    // Step 2: path-compress absorbed supervariables.
     for i in 0..n {
         if ws.nv[i] == 0 {
             let head_i = ws.pe[i];
@@ -1397,10 +1223,8 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
         }
     }
 
-    // Step 3: assembly-tree postorder. Writes postorder index into w.
     assembly_tree_postorder(ws);
 
-    // Step 4: invert w into head.
     for x in ws.head.iter_mut() {
         *x = NONE;
     }
@@ -1411,7 +1235,6 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
         }
     }
 
-    // Step 5: pivot-block starting positions.
     for x in ws.next.iter_mut() {
         *x = NONE;
     }
@@ -1425,7 +1248,6 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
         nel += ws.nv[eu];
     }
 
-    // Step 6: expand absorbed supervars + place dense-deferred at tail.
     for i in 0..n {
         if ws.nv[i] == 0 {
             let e = ws.pe[i];
@@ -1440,7 +1262,6 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
         }
     }
 
-    // Step 7: emit perm.
     let mut perm = vec![0i32; n];
     for i in 0..n {
         perm[ws.next[i] as usize] = i as i32;
@@ -1448,21 +1269,14 @@ pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
     perm
 }
 
-/// Build the assembly tree from `pe` (parent pointers) + `nv`
-/// (`> 0` selects pivots), apply the big-child-last heuristic, and
-/// run an iterative DFS postorder. Result indexes go into `ws.w`
-/// (NONE for non-pivot nodes).
 fn assembly_tree_postorder(ws: &mut Workspace) {
     let n = ws.n;
-    // Repurpose head/next/last as child/sibling/stack scratch.
     for x in ws.head.iter_mut() {
         *x = NONE;
     }
     for x in ws.next.iter_mut() {
         *x = NONE;
     }
-    // Link each pivot as a child of its parent. Reverse order so that
-    // after building, child lists are in ascending index order.
     for j in (0..n).rev() {
         if ws.nv[j] > 0 {
             let parent = ws.pe[j];
@@ -1473,9 +1287,6 @@ fn assembly_tree_postorder(ws: &mut Workspace) {
             }
         }
     }
-    // Big-child-last heuristic: move the child with the largest
-    // `elen` (frontal size) to the end of the sibling list so the
-    // deepest-recursion subtree is visited last.
     for i in 0..n {
         if ws.nv[i] > 0 && ws.head[i] != NONE {
             let child0 = ws.head[i];
@@ -1508,7 +1319,6 @@ fn assembly_tree_postorder(ws: &mut Workspace) {
             }
         }
     }
-    // Iterative DFS postorder from each pivot root.
     for x in ws.w.iter_mut() {
         *x = NONE;
     }
@@ -1520,9 +1330,6 @@ fn assembly_tree_postorder(ws: &mut Workspace) {
     }
 }
 
-/// Iterative DFS of one assembly-tree root. Stack lives in `last`,
-/// child list in `head`, sibling links in `next`. Writes postorder
-/// indices into `w`. Returns the next postorder index to assign.
 fn post_tree_dfs(ws: &mut Workspace, root: usize, k_start: usize) -> usize {
     let mut k = k_start;
     let mut top: usize = 1;
@@ -1531,15 +1338,12 @@ fn post_tree_dfs(ws: &mut Workspace, root: usize, k_start: usize) -> usize {
         let i = ws.last[top - 1] as usize;
         let child0 = ws.head[i];
         if child0 != NONE {
-            // Count children.
             let mut count = 0usize;
             let mut f = child0;
             while f != NONE {
                 count += 1;
                 f = ws.next[f as usize];
             }
-            // Push children into stack slots [top, top+count) with the
-            // first child at the highest position (popped first).
             let new_top = top + count;
             let mut t = new_top;
             let mut f = child0;
@@ -1553,7 +1357,7 @@ fn post_tree_dfs(ws: &mut Workspace, root: usize, k_start: usize) -> usize {
                 f = nf;
             }
             top = new_top;
-            ws.head[i] = NONE; // mark visited
+            ws.head[i] = NONE;
         } else {
             top -= 1;
             ws.w[i] = k as i32;
@@ -1574,34 +1378,19 @@ mod tests {
         Workspace::new(&p, &WorkspaceOptions::default()).unwrap()
     }
 
-    /// The AMF working-fill kernels must
-    /// be computed in `i64`. Both factors are `O(n)`, so for `n` >~ 46k
-    /// the products exceed `i32::MAX` (2_147_483_647) and wrap silently
-    /// in release / panic in debug, feeding garbage into the RMF pivot
-    /// score. Oracle: the exact hand-computed `i64` value of the
-    /// Amestoy 1999 formulas (HAMF4 variant).
     #[test]
     fn amf_wf_kernels_do_not_overflow_i32() {
-        // Surface contribution dext*(2*degree - dext - 1).
-        // dext = degree = 46342  ->  46342 * 46341 = 2_147_534_622,
-        // which is 50_975 above i32::MAX. Hand-computed external oracle.
         assert!(2_147_534_622_i64 > i32::MAX as i64);
         assert_eq!(amf_wf_surface(46342, 46342), 2_147_534_622_i64);
-        // Small-value sanity: dext=3, degree=4 -> 3*(8-3-1) = 12.
         assert_eq!(amf_wf_surface(3, 4), 12);
 
-        // Combine wf4 + 2*nvi*wf3.
-        // nvi = wf3 = 46342, wf4 = 0  ->  2 * 46342 * 46342
-        // = 4_295_161_928, which exceeds both i32::MAX and u32::MAX.
         assert!(4_295_161_928_i64 > u32::MAX as i64);
         assert_eq!(amf_wf_combine(0, 46342, 46342), 4_295_161_928_i64);
-        // Small-value sanity: 5 + 2*3*4 = 29.
         assert_eq!(amf_wf_combine(5, 3, 4), 29);
     }
 
     #[test]
     fn select_pivot_empty() {
-        // diag_4: every var pre-eliminated, no degree bucket populated.
         let cp = [0, 1, 2, 3, 4];
         let ri = [0, 1, 2, 3];
         let mut ws = ws_for(4, &cp, &ri);
@@ -1610,42 +1399,32 @@ mod tests {
 
     #[test]
     fn select_pivot_lifo_on_tridiag() {
-        // Tridiag 5: head[1] contains 4 -> 0 (LIFO).
         let cp = [0, 2, 5, 8, 11, 13];
         let ri = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
         let mut ws = ws_for(5, &cp, &ri);
         assert_eq!(select_pivot(&mut ws), Some(4));
         assert_eq!(ws.mindeg, 1);
-        // Head of deg-1 list now points to the remaining spoke (0).
         assert_eq!(ws.head[1], 0);
         assert_eq!(ws.last[0], NONE, "new head has no predecessor");
 
         assert_eq!(select_pivot(&mut ws), Some(0));
         assert_eq!(ws.head[1], NONE, "deg-1 bucket drained");
 
-        // Next call scans from mindeg=1 upward; only deg-2 non-empty.
         assert_eq!(select_pivot(&mut ws), Some(3));
         assert_eq!(ws.mindeg, 2);
     }
 
     #[test]
     fn create_element_elenme_zero_on_arrow_5_hub() {
-        // Arrow 5: hub has deg 4, but it's dense-deferred? Let's check.
-        // For n=5 default, dense = max(16, min(5, 10*sqrt(5))) = 5.
-        // deg 4 < 5, so hub is LIVE and sits in head[4].
-        // Spokes (deg 1) all share head[1]. The min-degree pivot is a
-        // spoke. Let's pick spoke 4 (LIFO head of deg-1).
         let cp = [0, 5, 7, 9, 11, 13];
         let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
         let mut ws = ws_for(5, &cp, &ri);
         let me = select_pivot(&mut ws).unwrap();
         assert_eq!(me, 4, "first pivot is the LIFO head of deg-1");
-        // elen[4] == 0 (no elements yet).
         assert_eq!(ws.elen[4], 0);
         let (pme1, pme2_excl, nvpiv, degme) = create_element(&mut ws, me).unwrap();
         assert_eq!(nvpiv, 1, "singleton supervariable");
         assert_eq!(degme, 1, "only neighbor is the hub (nv=1)");
-        // The new element's var list contains {hub} = {0}.
         assert_eq!(pme2_excl - pme1, 1);
         assert_eq!(ws.iw[pme1], 0);
         assert_eq!(ws.pe[4], pme1 as i32);
@@ -1653,50 +1432,36 @@ mod tests {
         assert_eq!(ws.elen[4], flip(1 + 1), "flip(nvpiv + degme)");
         assert_eq!(ws.nv[4], -1, "pivot marker");
         assert_eq!(ws.nv[0], -1, "hub marked");
-        // Hub was in head[4] with no siblings; it was removed.
         assert_eq!(ws.head[4], NONE);
-        // nel advanced by nvpiv.
         assert_eq!(ws.nel, 1);
     }
 
     #[test]
     fn create_element_elenme_zero_unlinks_from_degree_list() {
-        // Tridiag 5: pivot var 4 (deg 1), neighbor var 3 (deg 2).
-        // var 3 should be unlinked from head[2], which currently
-        // threads 3 -> 2 -> 1.
         let cp = [0, 2, 5, 8, 11, 13];
         let ri = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
         let mut ws = ws_for(5, &cp, &ri);
         let me = select_pivot(&mut ws).unwrap();
         assert_eq!(me, 4);
         let (_, _, _, _) = create_element(&mut ws, me).unwrap();
-        // After unlinking 3 (head of deg-2), head[2] -> 2.
         assert_eq!(ws.head[2], 2);
         assert_eq!(ws.last[2], NONE);
-        // Unlinked var's last/next are stale but the list is valid.
         assert_eq!(ws.nv[3], -1);
     }
 
     #[test]
     fn create_element_skips_absorbed_neighbors() {
-        // Construct a workspace where one neighbor is already absorbed
-        // (nv == 0 or nv < 0). That neighbor must NOT contribute.
         let cp = [0, 2, 5, 8, 11, 13];
         let ri = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
         let mut ws = ws_for(5, &cp, &ri);
-        // Mark var 0 as already-absorbed (nv <= 0).
         ws.nv[0] = 0;
         let me = select_pivot(&mut ws).unwrap();
         assert_eq!(me, 4);
         let (_, _, nvpiv, degme) = create_element(&mut ws, me).unwrap();
-        // Only neighbor 3 counts; not 0 (absorbed) and not the diagonal
-        // (skipped by init).
         assert_eq!(nvpiv, 1);
         assert_eq!(degme, 1);
     }
 
-    /// Drive the full loop on diag_4 - every var pre-eliminated,
-    /// loop terminates immediately.
     #[test]
     fn run_elimination_diag_4() {
         let cp = [0, 1, 2, 3, 4];
@@ -1707,9 +1472,6 @@ mod tests {
         assert_eq!(flops.ndiv, 0.0);
     }
 
-    /// Arrow 5: no dense deferral. Loop eliminates all 5 vars.
-    /// Verify `nel == n` and pivot supervariable count matches nv[me]
-    /// after the step (restored to positive).
     #[test]
     fn run_elimination_arrow_5() {
         let cp = [0, 5, 7, 9, 11, 13];
@@ -1717,15 +1479,11 @@ mod tests {
         let mut ws = ws_for(5, &cp, &ri);
         run_elimination(&mut ws, true, None).unwrap();
         assert_eq!(ws.nel, 5);
-        // Every var was pivoted exactly once => nv[i] > 0 everywhere
-        // (the pivot restores nv to +nvpiv).
         for i in 0..5 {
             assert!(ws.nv[i] >= 0, "nv[{}] = {}", i, ws.nv[i]);
         }
     }
 
-    /// Tridiag 10 full-symmetric: loop should terminate cleanly.
-    /// Oracle lnz = 9 - verified indirectly by the flop counter.
     #[test]
     fn run_elimination_tridiag_10() {
         let n = 10usize;
@@ -1747,9 +1505,6 @@ mod tests {
         assert_eq!(ws.nel, n);
     }
 
-    /// Grid 7x7: five-point stencil. The loop must terminate cleanly
-    /// and eliminate every variable regardless of how many inline GC
-    /// compactions are needed.
     #[test]
     fn run_elimination_grid_7x7() {
         let m = 7usize;
@@ -1787,9 +1542,6 @@ mod tests {
         assert_eq!(ws.nel, total);
     }
 
-    /// Band(20,3) triggers garbage collection in faer (oracle
-    /// ncmpa=1). The loop must run the compaction and finish the
-    /// elimination; verify both.
     #[test]
     fn run_elimination_band_20_3_triggers_gc() {
         let n = 20usize;
@@ -1815,8 +1567,6 @@ mod tests {
         );
     }
 
-    /// Arrow 200: hub dense-deferred in init; spokes get pivoted
-    /// one by one; loop terminates with ndense=1 survivor.
     #[test]
     fn run_elimination_arrow_200() {
         let n = 200usize;
@@ -1839,10 +1589,6 @@ mod tests {
         assert_eq!(ws.nel, n);
     }
 
-    /// Arrow 200 hub is dense-deferred; first pivot is a spoke with
-    /// no elements in its list, so the elenme==0 path is exercised
-    /// on a larger graph. Smoke test that the path completes without
-    /// indexing out of bounds.
     #[test]
     fn arrow_200_first_pivot_smoke() {
         let n = 200usize;
@@ -1860,14 +1606,10 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        // Hub (var 0) is dense-deferred; its nv was set to 0 during
-        // init. So when a spoke's list references 0, it's skipped.
         let me = select_pivot(&mut ws).unwrap();
         let (_, _, nvpiv, degme) = create_element(&mut ws, me).unwrap();
         assert_eq!(nvpiv, 1);
         assert_eq!(degme, 0, "spoke's only neighbor (hub) is deferred");
-        // Exactly one var (the pivot itself) has been eliminated plus
-        // the deferred hub that init already counted.
         assert_eq!(ws.nel, 2, "1 deferred hub + 1 pivot");
     }
 
@@ -1887,9 +1629,6 @@ mod tests {
         true
     }
 
-    /// diag_4: every variable is pre-eliminated at init as a
-    /// zero-degree singleton. Each is a tree root; postorder visits
-    /// them in ascending index order, giving perm = [0,1,2,3].
     #[test]
     fn permutation_diag_4() {
         let cp = [0, 1, 2, 3, 4];
@@ -1902,10 +1641,6 @@ mod tests {
         assert_eq!(perm, vec![0, 1, 2, 3]);
     }
 
-    /// Arrow 5 with hub live: LIFO spoke pivots first, then hub and
-    /// remaining spoke chain through aggressive absorption. The exact
-    /// root depends on pivot order and absorption choices; just
-    /// verify a valid permutation.
     #[test]
     fn permutation_arrow_5_valid() {
         let cp = [0, 5, 7, 9, 11, 13];
@@ -1917,8 +1652,6 @@ mod tests {
         assert!(is_permutation(&perm));
     }
 
-    /// Tridiag 10: valid permutation of 0..10. No structural
-    /// oracle here - just bijection + length checks.
     #[test]
     fn permutation_tridiag_10() {
         let n = 10usize;
@@ -1942,9 +1675,6 @@ mod tests {
         assert!(is_permutation(&perm));
     }
 
-    /// Arrow 200 with a dense-deferred hub. The hub (var 0, nv=0,
-    /// pe=NONE) is placed at the tail by the expand phase. All 199
-    /// spokes are pivots; permutation is still a bijection of 0..200.
     #[test]
     fn permutation_arrow_200_hub_deferred() {
         let n = 200usize;
@@ -1973,7 +1703,6 @@ mod tests {
         );
     }
 
-    /// Grid 7x7: ensure the permutation survives GC-triggered runs.
     #[test]
     fn permutation_grid_7x7() {
         let m = 7usize;
@@ -2013,8 +1742,6 @@ mod tests {
         assert!(is_permutation(&perm));
     }
 
-    /// Band(20, 3) with GC: permutation remains a valid bijection
-    /// even after ncmpa >= 1 compactions.
     #[test]
     fn permutation_band_20_3() {
         let n = 20usize;
@@ -2037,7 +1764,6 @@ mod tests {
         assert!(is_permutation(&perm));
     }
 
-    /// Empty pattern (n == 0) round-trips to an empty permutation.
     #[test]
     fn permutation_empty() {
         let cp = [0i32];

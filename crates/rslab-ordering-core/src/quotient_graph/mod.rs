@@ -19,10 +19,6 @@
 //! degree ordering algorithm," SIAM J. Matrix Analysis 17:886-905;
 //! Amestoy (1999) habilitation thesis (AMF metric).
 
-// Quotient-graph internals (Workspace fields, StepFlops fields, etc.)
-// are pub so the ordering crates can read them directly. They are
-// deliberately not part of the ordering-crate contract; see
-// CONTRACT_VERSION.
 #![allow(missing_docs)]
 
 mod algo;
