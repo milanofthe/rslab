@@ -136,8 +136,6 @@ fn blocked<T: Field>(
     .into_any())
 }
 
-/// The core's Krylov settings from the keyword arguments; an unset
-/// `restart` is fitted to the basis memory budget there.
 fn settings(tol: f64, maxit: usize, restart: Option<usize>) -> KrylovSettings {
     KrylovSettings {
         tol,
@@ -241,11 +239,6 @@ pub fn cocr<T: Field, M: Preconditioner<T> + Sync + ?Sized>(
         .map_err(map_err)?;
     single(py, r)
 }
-
-// ---------------------------------------------------------------------------
-// Unpreconditioned module functions (the Python wrappers route the
-// preconditioned case through the handle methods).
-// ---------------------------------------------------------------------------
 
 /// Unpreconditioned flexible GMRES on the CSC matrix ``(n, indptr, indices, data)``.
 #[pyfunction]

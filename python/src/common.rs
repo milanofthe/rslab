@@ -220,7 +220,6 @@ impl Pattern {
 /// triangle taken (`lower`) or the whole.
 pub struct Values<'py, 'p> {
     data: Bound<'py, PyAny>,
-    /// `(indptr, indices)` of a matrix; none for a value array.
     index: Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>,
     col_ptr: &'p [usize],
     row_idx: &'p [usize],
@@ -303,9 +302,6 @@ impl<'py, 'p> Values<'py, 'p> {
     }
 }
 
-/// The values of the canonical CSC matrix `(ip, ix, data)` (each column's
-/// rows from the diagonal down with `lower`) in the order of the pattern
-/// `(col_ptr, row_idx)`, or none if its pattern is another.
 fn gather<I: CscIndex, T: Copy>(
     ip: &[I],
     ix: &[I],
@@ -363,8 +359,6 @@ pub fn block<T: Element + Copy>(
     })?;
     let view = arr.as_array();
     let (n, nrhs) = view.dim();
-    // Iterating the transposed view walks the block column by column in
-    // logical order, whatever memory order NumPy hands over.
     Ok((n, nrhs, view.t().iter().copied().collect()))
 }
 
@@ -506,7 +500,6 @@ pub fn diagnostics_dict(py: Python<'_>, d: &Diagnostics) -> PyResult<PyObject> {
     Ok(out.into_any().unbind())
 }
 
-/// Index type of a SciPy CSC matrix (`int32` or `int64`).
 trait CscIndex: Element + Copy + Ord {
     fn to_usize(self) -> Option<usize>;
     fn from_usize(v: usize) -> Option<Self>;
@@ -530,9 +523,6 @@ impl CscIndex for i64 {
     }
 }
 
-/// Lower triangle (rows at or below the diagonal) of an `n x n` CSC matrix in
-/// canonical format: sorted rows, no duplicates. Each column's lower part is a
-/// suffix of the column, found by binary search and copied as one slice.
 fn lower_suffixes<I: CscIndex, T: Copy>(
     n: usize,
     indptr: &[I],

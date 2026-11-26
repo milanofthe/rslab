@@ -77,16 +77,10 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-// See the `mimalloc` note in Cargo.toml: the core stays allocator-agnostic,
-// the extension module picks the allocator for the process.
 #[cfg(not(feature = "alloc-stats"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// Feature `alloc-stats`: mimalloc behind byte counters, so the benches can read
-// the exact heap peak of a phase (`_alloc_stats`, `_reset_alloc_peak`) and hold
-// the memory estimate against it. Measurement builds only: every allocation
-// pays two atomic updates.
 #[cfg(feature = "alloc-stats")]
 #[global_allocator]
 static GLOBAL: counting::Counting = counting::Counting;

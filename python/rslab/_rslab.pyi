@@ -13,7 +13,6 @@ from numpy.typing import NDArray
 import scipy.sparse as sp
 
 __version__: str
-# The Krylov defaults of the core (`rslab::constants`).
 KRYLOV_TOL: float
 KRYLOV_MAX_ITER: int
 

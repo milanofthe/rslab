@@ -1,15 +1,5 @@
 name: ci
 
-# Static + test gate for the pure-Rust workspace. The Python wheels are built
-# separately in publish.yml; this workflow only type-checks the extension
-# crate. The workspace is 100% pure Rust (the vendored ordering crates carry
-# no C/build.rs), so it builds on a stock ubuntu runner with no system libraries.
-#
-# COST POLICY: CI is a fast static + unit gate ONLY; hard 5-minute budget.
-# Benchmarks and study runs (benches/, report data) are local-only via make;
-# they never run on CI. The matgen feature is a strict superset of the default
-# build, so one clippy pass and one test pass with it cover both configurations.
-
 on:
   push:
     branches: [main]
@@ -21,9 +11,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Overrides the repo's `target-cpu=native` (.cargo/config.toml): the cached
-  # target dir outlives the runner it was built on, and a runner with another
-  # CPU then dies with SIGILL. x86-64-v3 keeps the FMA/AVX2 paths under test.
   RUSTFLAGS: -C target-cpu=x86-64-v3
 
 jobs:
@@ -32,13 +19,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # rust-toolchain.toml pins `stable` + rustfmt/clippy; honour it here.
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          fetch-depth: 0
+      - uses: milanofthe/negentropy@v1.7.1
+      - name: toolchain as pinned in rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - name: cache, seeded by failed runs too
+        uses: Swatinem/rust-cache@v2
         with:
-          # A timed-out cold run must still seed the cache so the retry is warm.
           cache-on-failure: true
           workspaces: |
             . -> target
@@ -48,18 +38,12 @@ jobs:
         run: cargo fmt --check
 
       - name: python lock matches the manifests
-        # The extension is built on release only; its lock is checked here,
-        # so a pin changed in the core reaches it.
         run: cargo metadata --locked --format-version 1 --manifest-path python/Cargo.toml > /dev/null
 
-      - name: python extension compiles
-        # The extension is a crate of its own outside the workspace: check it
-        # here so a change of the core's API breaks this job, not the release.
+      - name: python extension compiles (a crate outside the workspace)
         run: cargo check --locked --manifest-path python/Cargo.toml
 
       - name: clippy (all targets, matgen and tuning)
-        # Both features are additive: this single pass lints the default code,
-        # the matgen-gated benches and tests, and the tuning planner.
         run: cargo clippy --all-targets --features matgen,tuning -- -D warnings
 
       - name: rustdoc (broken links are errors)
@@ -68,8 +52,4 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
       - name: test (matgen superset)
-        # Runs the full lib test set plus the matgen-gated tests in one pass,
-        # with the rsprobe record and its allocation counts on (the allocation
-        # and record tests need them; clippy and rustdoc build it off).
-        # The tuning tests time a calibration and stay local.
         run: cargo test --features matgen,rsprobe/alloc

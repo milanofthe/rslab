@@ -58,7 +58,6 @@ pub struct PivotFloor<T> {
 }
 
 impl<T: Scalar> PivotFloor<T> {
-    /// The same entry in the field `H` this one is the lower-precision twin of.
     pub(crate) fn promote<H: Scalar<Low = T>>(self) -> PivotFloor<H> {
         PivotFloor {
             row: self.row,
@@ -172,8 +171,6 @@ impl<T: Scalar> RefineOperator<T> for CscMatrix<T> {
         for v in y.iter_mut().take(self.n) {
             *v = 0.0;
         }
-        // The stored lower triangle stands for both halves, exactly as in
-        // `symv`: the off-diagonal entry contributes to its row and its column.
         for j in 0..self.n {
             for k in self.col_ptr[j]..self.col_ptr[j + 1] {
                 let i = self.row_idx[k];
@@ -201,7 +198,6 @@ impl<T: Scalar> RefineOperator<T> for GeneralCsc<T> {
     }
 }
 
-/// `A + E`: the operator `a` plus the pivot floors of a factor.
 struct Floored<'a, T, A: ?Sized> {
     a: &'a A,
     floors: &'a [PivotFloor<T>],
@@ -220,8 +216,6 @@ impl<T: Scalar, A: RefineOperator<T> + ?Sized> LinearOperator<T> for Floored<'_,
 }
 
 impl<T: Scalar, A: RefineOperator<T> + ?Sized> RefineOperator<T> for Floored<'_, T, A> {
-    /// `(|A| + |E|) |x|`: the magnitudes of the two parts, not of their sum,
-    /// which only the factor's frame knows.
     fn apply_abs(&self, x: &[T], y: &mut [f64]) {
         self.a.apply_abs(x, y);
         for f in self.floors {
@@ -230,8 +224,6 @@ impl<T: Scalar, A: RefineOperator<T> + ?Sized> RefineOperator<T> for Floored<'_,
     }
 }
 
-/// `||r||_inf / (||A||_inf ||x||_inf + ||b||_inf)`, with `a_inf = ||A||_inf`
-/// supplied by the caller (it is a property of the matrix, not of the iterate).
 fn normwise<T: Scalar>(r: &[T], x: &[T], b: &[T], a_inf: f64) -> f64 {
     let inf = |v: &[T]| v.iter().map(|z| z.magnitude()).fold(0.0f64, f64::max);
     let den = a_inf * inf(x) + inf(b);
@@ -242,8 +234,6 @@ fn normwise<T: Scalar>(r: &[T], x: &[T], b: &[T], a_inf: f64) -> f64 {
     }
 }
 
-/// `max_i |r_i| / (|A| |x| + |b|)_i` over the rows whose denominator is
-/// nonzero.
 fn componentwise<T: Scalar>(r: &[T], b: &[T], abs_ax: &[f64]) -> f64 {
     let mut worst = 0.0f64;
     for i in 0..r.len() {
@@ -255,9 +245,6 @@ fn componentwise<T: Scalar>(r: &[T], b: &[T], abs_ax: &[f64]) -> f64 {
     worst
 }
 
-/// Refine `x` in place for `b`, using `solve` (a factor of `a + E`, `E` its
-/// pivot `floors`) for the correction steps, against the system
-/// `policy.system` names, and report what was achieved.
 pub(crate) fn refine_in_place<T, A, S>(
     a: &A,
     floors: &[PivotFloor<T>],
@@ -279,11 +266,6 @@ where
     }
 }
 
-/// Refine `x` in place against `a` and `b`.
-///
-/// The iterate returned is the best one seen, not the last: refinement is not
-/// monotone on ill-conditioned systems, and returning a worse vector than the
-/// one already computed would be a regression the caller cannot detect.
 fn refine_against<T, A, S>(
     a: &A,
     b: &[T],
@@ -300,8 +282,6 @@ where
     debug_assert_eq!(b.len(), n);
     let a_inf = match policy.measure {
         BackwardError::Normwise => {
-            // ||A||_inf via one pass with a unit vector: exact for the row sums
-            // of |A|, and it reuses the operator both storage forms provide.
             let ones = vec![T::one(); n];
             let mut rows = vec![0.0f64; n];
             a.apply_abs(&ones, &mut rows);
@@ -330,7 +310,6 @@ where
             best_omega = omega;
             best.copy_from_slice(x);
         }
-        // A non-finite iterate never certifies, whatever the measure says.
         let finite = x.iter().all(|v| v.magnitude().is_finite());
         if (finite && omega <= policy.target) || it == policy.max_steps {
             break;
@@ -349,4 +328,22 @@ where
         omega: best_omega,
         certified,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refinement_returns_the_best_iterate_not_the_last() {
+        let a = GeneralCsc::<f64>::from_triplets(2, &[0, 1], &[0, 1], &[1.0, 1.0]).unwrap();
+        let b = [1.0, 1.0];
+        let start = [0.9, 0.9];
+        let mut x = start;
+        let diverging = |r: &[f64]| Ok(r.iter().map(|v| 10.0 * v).collect());
+        let out = refine_in_place(&a, &[], &b, &mut x, &RefinePolicy::steps(3), diverging).unwrap();
+        assert_eq!(out.steps, 3);
+        assert_eq!(x, start);
+        assert!(!out.certified);
+    }
 }

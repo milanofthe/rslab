@@ -66,6 +66,13 @@ pub const CALIB_GRID_SMALL: usize = 24;
 /// Contract: timing.
 pub const CALIB_GRID_LARGE: usize = 32;
 
+/// Diagonal of the 7-point Laplacian of the calibration grids (1).
+/// Used by: `tuning::grid3d_spd`.
+/// Why: it balances the six off-diagonal `-1` entries of an interior point,
+/// the standard 7-point stencil.
+/// Contract: timing.
+pub const CALIB_STENCIL_DIAGONAL: f64 = 6.0;
+
 /// One-thread factorizations timed for the noise floor (runs).
 /// Used by: `tuning::Calibration::measure`.
 /// Why: enough for a coefficient of variation, short enough to install.

@@ -16,9 +16,6 @@ use crate::scalar::Scalar;
 use crate::sparse::csc::CscMatrix;
 use crate::sparse::general::GeneralCsc;
 
-/// Build a lower-triangle [`CscMatrix`] from generator triplets. The generators
-/// construct valid triplets by definition, so a failure is an internal invariant
-/// violation (panic, not an error path) - avoids `unwrap`/`expect` in `src/`.
 pub(crate) fn build_sym<T: Scalar>(
     n: usize,
     rows: &[usize],
@@ -31,7 +28,6 @@ pub(crate) fn build_sym<T: Scalar>(
     }
 }
 
-/// As [`build_sym`] but for the full unsymmetric [`GeneralCsc`].
 pub(crate) fn build_gen<T: Scalar>(
     n: usize,
     rows: &[usize],
@@ -179,8 +175,6 @@ mod integration {
 
     #[test]
     fn symmetric_families_factor_and_solve() {
-        // SPD stencil, complex-symmetric Helmholtz, banded, indefinite KKT (2x2 BK),
-        // and an exactly-ill-conditioned spectral matrix.
         let cases: Vec<(&str, CscMatrix<C>)> = vec![
             (
                 "poisson3d",
@@ -224,10 +218,6 @@ mod integration {
 
     #[test]
     fn solver_is_type_agnostic_all_four_scalars() {
-        // Prove end-to-end that factor+solve works for **every** Scalar type - not
-        // just the f64/Complex<f64> the other tests use. A latent f32/Complex<f32>
-        // monomorphization gap (e.g. a GEMM only specialized for f64/c64) would fail
-        // to compile or solve here.
         use crate::Scalar;
         fn sym_ok<T: Scalar>(u: f64) {
             let a = structured::banded::<T>(200, 6, 1.0, 1);
@@ -265,7 +255,6 @@ mod integration {
                 omega
             );
         }
-        // f64 / f32 / Complex<f64> / Complex<f32> - the four Scalar impls.
         sym_ok::<f64>(U64);
         sym_ok::<f32>(U32);
         sym_ok::<C>(UC64);
@@ -275,7 +264,6 @@ mod integration {
         unsym_ok::<C>(UC64);
         unsym_ok::<Complex<f32>>(UC32);
 
-        // The memory estimator scales with the scalar size - agnostic too.
         let a32 = random::random_unsym::<f32>(150, 8, 2.0, 1);
         let e32 = LuSymbolic::analyze(&a32, &SolverSettings::default())
             .unwrap()
@@ -294,7 +282,6 @@ mod integration {
 
     #[test]
     fn diagnostics_and_estimate_wired_on_both_paths() {
-        // Symmetric -> LDL^T.
         let a = structured::banded::<C>(500, 8, 1.0, 1);
         let opts = SolverSettings::default().with_threads(3);
         let f = LdltSymbolic::analyze(&a, &SolverSettings::default())
@@ -312,7 +299,6 @@ mod integration {
             "transient > factor alone"
         );
 
-        // Unsymmetric -> LU; threads=0 resolves to all cores.
         let g = bem::kernel(600, &bem::BemOpts::default());
         let o2 = SolverSettings::default().with_threads(0);
         let lf = LuSymbolic::analyze(&g, &SolverSettings::default())

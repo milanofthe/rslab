@@ -81,9 +81,10 @@ impl MemoryEstimate {
     /// argmin over the worker count correctly stops adding threads once the
     /// critical path (or, in the full v2 model, memory bandwidth) dominates.
     pub fn est_runtime_ms_threaded(&self, gflops: f64, parallel_speedup: f64) -> f64 {
-        let rate1 = gflops.max(RATE_FLOOR) * GIGA; // one-thread geom-flops/s
-        let serial_floor = self.critical_path_flops as f64 / rate1;
-        let parallel = self.factor_flops as f64 / (rate1 * parallel_speedup.max(RATE_FLOOR));
+        let one_thread_rate = gflops.max(RATE_FLOOR) * GIGA;
+        let serial_floor = self.critical_path_flops as f64 / one_thread_rate;
+        let parallel =
+            self.factor_flops as f64 / (one_thread_rate * parallel_speedup.max(RATE_FLOOR));
         serial_floor.max(parallel) * MS_PER_S
     }
 }
@@ -169,9 +170,6 @@ impl SolveStats {
     }
 }
 
-/// [`SolveStats`] behind a mutex, so a factor handle records its solves
-/// through `&self`; cloning snapshots the counters (a cloned handle starts a
-/// separate account).
 #[derive(Debug, Default)]
 pub(crate) struct SolveCounter(std::sync::Mutex<SolveStats>);
 
@@ -193,10 +191,6 @@ impl Clone for SolveCounter {
     }
 }
 
-/// [`MemoryEstimate`]s of one analysis, keyed by scalar size and complexity.
-/// The estimate is a pure function of the structure and the scalar type, but
-/// computing it walks every node's updaters, expensive enough to pay only
-/// once per scalar type.
 #[derive(Debug, Default)]
 pub(crate) struct EstimateCache(std::sync::Mutex<Vec<((usize, bool), MemoryEstimate)>>);
 
@@ -255,9 +249,6 @@ impl Diagnostics {
             self.factor_nnz as f64 / self.nnz_a as f64
         }
     }
-    /// The counts of this factorization as measures at the current scope,
-    /// and its [`summary`](Self::summary) as a DEBUG event there: a caller
-    /// that factors per step gets one per factorization.
     pub(crate) fn probe(&self) {
         rsprobe::add!("fill", self.factor_nnz);
         if let Some(e) = &self.estimate {

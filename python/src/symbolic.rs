@@ -14,10 +14,6 @@ use crate::common::{
 use crate::factor::{Auto, Field, Klu, Ldlt, Lu, Pair};
 use crate::settings::{klu_settings_from, settings_from, PyKluSettings, PySettings};
 
-// ---------------------------------------------------------------------------
-// LDL^T
-// ---------------------------------------------------------------------------
-
 /// Analysis of a symmetric pattern (ordering, elimination tree, supernodes),
 /// from :func:`rslab.analyze` with ``path='ldlt'``. Factor any value set on
 /// the same pattern with :meth:`factor`; the analysis is paid once.
@@ -266,10 +262,6 @@ pub fn ldlt_factor(
     })
 }
 
-// ---------------------------------------------------------------------------
-// LU
-// ---------------------------------------------------------------------------
-
 /// Analysis of a general pattern for the supernodal LU path, from
 /// :func:`rslab.analyze` with ``path='lu'``. Factor any value set on the
 /// same pattern with :meth:`factor`.
@@ -509,10 +501,6 @@ pub fn lu_factor(
     })
 }
 
-// ---------------------------------------------------------------------------
-// KLU
-// ---------------------------------------------------------------------------
-
 /// Analysis of a general pattern for the KLU path (block triangular form,
 /// per-block AMD), from :func:`rslab.analyze` with ``path='klu'``. Factor any
 /// value set on the same pattern with :meth:`factor`.
@@ -750,10 +738,6 @@ pub fn klu_factor(
     })
 }
 
-// ---------------------------------------------------------------------------
-// The automatic path
-// ---------------------------------------------------------------------------
-
 /// The automatic path's settings: the supernodal paths' (``settings`` and
 /// the keywords, also returned as given), KLU's, and the routing between
 /// them.
@@ -786,7 +770,6 @@ pub struct PyAutoSymbolic {
     sym: std::sync::Arc<rslab::AutoSymbolic>,
     pattern: Pattern,
     settings: rslab::AutoSettings,
-    /// The supernodal settings as given, the defaults of :meth:`memory_plan`.
     supernodal: PySettings,
 }
 

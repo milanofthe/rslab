@@ -5,15 +5,12 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The units of a part done so far, out of its total.
 pub(crate) struct Steps {
     total: u64,
     done: AtomicU64,
 }
 
 impl Steps {
-    /// Steps over `total` units; `None` where `active` is false (no
-    /// context, or the part's site does not record), so nothing is counted.
     pub(crate) fn new(active: bool, total: u64) -> Option<Steps> {
         (active && total > 0).then(|| Steps {
             total,
@@ -21,21 +18,17 @@ impl Steps {
         })
     }
 
-    /// `k` more units done: the step reached where they cross into a new one.
     #[inline]
     pub(crate) fn add(&self, k: u64) -> Option<u64> {
         let before = self.done.fetch_add(k, Ordering::Relaxed);
         self.crossed(before, before + k)
     }
 
-    /// `done` units done, a count that only rises: the step reached where it
-    /// crosses into a new one.
     pub(crate) fn reach(&self, done: u64) -> Option<u64> {
         let before = self.done.fetch_max(done, Ordering::Relaxed);
         self.crossed(before, done.max(before))
     }
 
-    /// Every unit done: the last step, where it was not reached before.
     pub(crate) fn finish(&self) -> Option<u64> {
         self.reach(self.total)
     }
