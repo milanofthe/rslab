@@ -87,7 +87,9 @@ impl<T: Scalar> KluSolver<T> {
             + vec_bytes(&f.scatter_target)
             + vec_bytes(&f.plan.blocks)
             + (f.plan.blocks.iter())
-                .map(|p| vec_bytes(&p.level_ptr) + vec_bytes(&p.level_cols) + vec_bytes(&p.level_work))
+                .map(|p| {
+                    vec_bytes(&p.level_ptr) + vec_bytes(&p.level_cols) + vec_bytes(&p.level_work)
+                })
                 .sum::<u64>()
             + vec_bytes(&f.ready.done)
             + vec_bytes(&f.modes)

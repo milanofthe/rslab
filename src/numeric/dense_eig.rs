@@ -21,8 +21,8 @@
 //! defective or inaccurate subspace can only make the solve slower, never wrong.
 
 use crate::constants::{
-    DENSE_SINGULAR_TOL, DISCRIMINANT_FACTOR, INVERSE_ITERATION_SHIFT, QR_EXCEPTIONAL_PERIOD, QR_EXCEPTIONAL_SHIFT,
-    QR_ITER_PER_DIM, TINY,
+    DENSE_SINGULAR_TOL, DISCRIMINANT_FACTOR, INVERSE_ITERATION_SHIFT, QR_EXCEPTIONAL_PERIOD,
+    QR_EXCEPTIONAL_SHIFT, QR_ITER_PER_DIM, TINY,
 };
 use num_complex::Complex;
 
