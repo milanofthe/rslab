@@ -94,15 +94,27 @@ mod tests {
             },
             ..SolverSettings::default().with_threads(0)
         });
-        let x_par = solve(&SolverSettings {
-            kernels: KernelSettings {
-                scalar_gate: 0,
-                par_gemm: 0,
-                par_cdiv: 0,
-                ..Default::default()
+        let pool = std::sync::Arc::new(crate::parallel::FreeTestPool::new(4));
+        let x_par = crate::parallel::install(
+            pool.clone() as std::sync::Arc<dyn crate::parallel::Pool>,
+            || {
+                solve(&SolverSettings {
+                    kernels: KernelSettings {
+                        scalar_gate: 0,
+                        par_gemm: 0,
+                        par_cdiv: 0,
+                        fork_min_flops: 0,
+                        ..Default::default()
+                    },
+                    ..SolverSettings::default().with_threads(0)
+                })
             },
-            ..SolverSettings::default().with_threads(0)
-        });
+        );
+        assert!(
+            pool.widest() > 1,
+            "the parallel path ran on {} threads",
+            pool.widest()
+        );
         let bound = solve_backward_error(a.n, UC64);
         for (name, x) in [
             ("default", &x_def),
@@ -117,7 +129,7 @@ mod tests {
     #[test]
     fn every_panel_width_gives_a_backward_stable_solve() {
         let (a, b) = helmholtz(9);
-        for nb in [16usize, 32, 64, 100, 200] {
+        for nb in [8usize, 12, 16, 64] {
             let mut s = SolverSettings::default();
             s.kernels.panel_nb = nb;
             let x = LdltSolver::factor(&a, &s).unwrap().solve(&b).unwrap();
