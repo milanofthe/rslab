@@ -41,7 +41,7 @@ fn factor_honours_the_ordering_in_the_settings() {
     );
     assert!(
         rcm > amd * 3 / 2 && rcm > nd * 3 / 2,
-        "the band ordering RCM does not fill far above AMD and ND on a 2D grid,          so the ordering setting is ignored: amd {amd} nd {nd} rcm {rcm}"
+        "the band ordering RCM does not fill far above AMD and ND on a 2D grid, so the ordering is ignored: amd {amd} nd {nd} rcm {rcm}"
     );
     assert_ne!(amd, rcm, "the ordering setting is ignored");
 }
@@ -77,6 +77,6 @@ fn ldlt_factor_with_honours_the_ordering_in_the_settings() {
     let (amd, rcm) = (fill(OrderingMethod::Amd), fill(OrderingMethod::Rcm));
     assert!(
         rcm > amd * 3 / 2,
-        "the band ordering RCM does not fill far above AMD on a 2D grid,          so the ordering setting is ignored: amd {amd} rcm {rcm}"
+        "the band ordering RCM does not fill far above AMD on a 2D grid, so the ordering is ignored: amd {amd} rcm {rcm}"
     );
 }
