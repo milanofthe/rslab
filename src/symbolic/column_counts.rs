@@ -29,15 +29,6 @@ pub fn column_counts(pattern: &CscPattern, _etree: &EliminationTree) -> Vec<usiz
         return Vec::new();
     }
 
-    // Simulate the elimination to compute the exact fill pattern.
-    // For each column j, track the set of row indices i > j that will
-    // have nonzeros in L[:,j].
-    //
-    // When column j is eliminated, for every pair of rows (i1, i2) in
-    // L[:,j] with i1 > j and i2 > j, a fill entry is created at (max(i1,i2), min(i1,i2)).
-    // These fill entries propagate to subsequent columns.
-
-    // Build adjacency: for each column j, the set of rows > j
     let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (j, col_j) in col_rows.iter_mut().enumerate() {
         for k in pattern.col_ptr[j]..pattern.col_ptr[j + 1] {
@@ -50,18 +41,15 @@ pub fn column_counts(pattern: &CscPattern, _etree: &EliminationTree) -> Vec<usiz
         col_j.dedup();
     }
 
-    let mut counts = vec![1usize; n]; // diagonal always present
+    let mut counts = vec![1usize; n];
 
     for j in 0..n {
         let rows = std::mem::take(&mut col_rows[j]);
         counts[j] += rows.len();
 
-        // Propagate fill: all rows in this column become connected.
-        // The minimum row index inherits all other row indices.
         if rows.len() > 1 {
-            let min_row = rows[0]; // smallest row > j
+            let min_row = rows[0];
             for &row in &rows[1..] {
-                // Add row to column min_row's pattern (if not already present)
                 if !col_rows[min_row].contains(&row) {
                     col_rows[min_row].push(row);
                 }
@@ -106,13 +94,6 @@ pub fn column_counts_gnp(pattern: &CscPattern, etree: &EliminationTree) -> Vec<u
     )
 }
 
-/// The Gilbert-Ng-Peyton count over a column view: `cols(i)` yields the rows
-/// of column `i` (any order, no duplicates; entries on or above the diagonal
-/// are skipped), and row `r` counts `weight(r)` times. With every weight one
-/// these are the column counts; on a graph of groups of indistinguishable
-/// vertices weighted by their sizes, the count of a group is the one of its
-/// first member (every term of the count belongs to one row, and a group's
-/// rows enter together).
 pub(crate) fn gnp<I: Iterator<Item = usize>>(
     n: usize,
     etree: &EliminationTree,
@@ -130,36 +111,19 @@ pub(crate) fn gnp<I: Iterator<Item = usize>>(
         has_child[*p] = true;
     }
 
-    // delta[i] starts at 1 iff i is a leaf of the etree (the row subtree
-    // T^r_i trivially contains i as a leaf whenever i has no etree children
-    // - the contribution of every node i to its own column count).
     let mut delta: Vec<i64> = (0..n)
         .map(|i| if has_child[i] { 0 } else { weight(i) })
         .collect();
 
-    // maxfirst[k]: max first[i_prev] over previously-seen row-subtree leaves
-    //              that contributed to column k. -1 until any leaf is seen.
-    // prevleaf[k]: the previous such i, used to find the LCA with the
-    //              current i via disjoint-set `find` on the partial etree.
-    // ancestor[i]: DSU pointer; after node i is "processed" (below), it
-    //              points (eventually) to the deepest still-unprocessed
-    //              ancestor - which is the LCA of any two descendants.
     let mut maxfirst = vec![-1i64; n];
     let mut prevleaf = vec![-1i64; n];
     let mut ancestor: Vec<usize> = (0..n).collect();
 
     for &i in &post {
-        // Head step (cs_counts.c): every non-root node contributes -1 to
-        // its parent's delta, canceling the double-count produced when
-        // the accumulation pass merges i and parent(i)'s subtree sums.
         if let Some(p) = etree.parent[i] {
             delta[p] -= weight(i);
         }
 
-        // Walk column i of the symmetric pattern. Entries with row
-        // partner > i are the below-diagonal nonzeros A(partner, i).
-        // For each such partner, test whether i is a leaf of the row
-        // subtree T^r_{partner}. Condition: first[i] > maxfirst[partner].
         let fi = first[i] as i64;
         for partner in cols(i) {
             if partner <= i {
@@ -169,8 +133,6 @@ pub(crate) fn gnp<I: Iterator<Item = usize>>(
                 delta[i] += weight(partner);
                 let pl = prevleaf[partner];
                 if pl != -1 {
-                    // LCA of pl and i via path-compressed find on the
-                    // partially-unioned etree.
                     let mut q = pl as usize;
                     while ancestor[q] != q {
                         q = ancestor[q];
@@ -188,14 +150,11 @@ pub(crate) fn gnp<I: Iterator<Item = usize>>(
                 maxfirst[partner] = fi;
             }
         }
-        // Union i into its parent so subsequent `find`s from descendants
-        // of i stop at the parent (the LCA with any later-processed node).
         if let Some(p) = etree.parent[i] {
             ancestor[i] = p;
         }
     }
 
-    // Accumulate deltas up the etree (children into parents) in postorder.
     for &i in &post {
         if let Some(p) = etree.parent[i] {
             delta[p] += delta[i];
@@ -209,11 +168,6 @@ pub(crate) fn gnp<I: Iterator<Item = usize>>(
 mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
-
-    // --- GNP column-count parity tests ---
-    //
-    // Each reuses the exact pattern from the reference tests above and
-    // asserts column_counts_gnp returns the same vector as column_counts.
 
     #[test]
     fn gnp_matches_reference_diagonal() {
@@ -267,8 +221,6 @@ mod tests {
 
     #[test]
     fn gnp_matches_reference_banded() {
-        // 7x7 banded: entries on diagonal, sub-diagonal, and 2 below diagonal.
-        // Produces a non-trivial row-subtree pattern (more interesting than chain).
         let rows = vec![0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6, 5, 6, 6];
         let cols = vec![0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 6];
         let m = CscMatrix::from_triplets(7, &rows, &cols, &vec![1.0; rows.len()]).unwrap();

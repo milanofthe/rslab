@@ -10,29 +10,19 @@
 //! size keeps the bisections balanced as on the full graph.
 use crate::sparse::csc::CscPattern;
 
-/// FNV-1a 64 offset basis (published constant of the hash).
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
-/// FNV-1a 64 prime (published constant of the hash).
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// What the adjacency hash costs per entry.
 static KEY_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What sorting and splitting the vertices by key costs per vertex.
 static SORT_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// What the compressed graph costs per entry of the pattern.
 static COMPRESS_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
-/// Groups of indistinguishable vertices of a symmetric pattern.
-///
-/// Group `g` holds the original vertices `members[ptr[g]..ptr[g + 1]]` in
-/// ascending order; groups are numbered by their smallest member, so the
-/// grouping is a pure function of the pattern.
 pub(crate) struct Supervariables {
     /// `group_of[v]` is the group of original vertex `v`.
     pub group_of: Vec<usize>,
@@ -52,8 +42,6 @@ impl Supervariables {
             let has_self = rows.get(at).is_some_and(|&r| r as usize == v);
             (rows, at, has_self)
         };
-        // Order-independent key of the closed adjacency: its length and a
-        // hash over the sorted rows with `v` merged in.
         let key = |v: usize| -> (usize, u64) {
             let (rows, at, has_self) = closed(v);
             let mut h: u64 = FNV_OFFSET;
@@ -92,10 +80,6 @@ impl Supervariables {
         let sort = crate::parallel::Work::of(n as f64, &SORT_RATE);
         crate::parallel::sort_unstable_by_key(&mut by_key, sort, |&v| (keys[v], v));
 
-        // Within a run of equal keys, split into exact-equality classes
-        // (hash collisions are rare; the leader is the smallest member).
-        // Runs are contiguous in `by_key` and independent, so they split in
-        // parallel: `lead[i]` is the leader of `by_key[i]`.
         const NONE: usize = usize::MAX;
         let mut runs: Vec<&mut [usize]> = Vec::new();
         let mut lead = vec![NONE; n];
@@ -138,11 +122,10 @@ impl Supervariables {
             leader[v] = lead[i];
         }
 
-        // Number the groups by leader; `v` ascending visits every leader
-        // before its members, so members come out ascending too.
         let mut group_of = vec![NONE; n];
         let mut sizes: Vec<usize> = Vec::new();
         for v in 0..n {
+            debug_assert!(leader[v] <= v);
             let g = if leader[v] == v {
                 sizes.push(0);
                 sizes.len() - 1
@@ -244,7 +227,6 @@ impl Supervariables {
 mod tests {
     use super::*;
 
-    /// Full symmetric pattern with the diagonal, from an edge list.
     fn pattern(n: usize, edges: &[(usize, usize)]) -> CscPattern<i32> {
         let mut cols: Vec<Vec<i32>> = (0..n).map(|v| vec![v as i32]).collect();
         for &(a, b) in edges {
@@ -268,15 +250,12 @@ mod tests {
 
     #[test]
     fn twins_group_and_compress() {
-        // 0 and 1 are adjacent twins (same closed neighbourhood {0,1,2});
-        // 3 and 4 are adjacent twins ({2,3,4}); 2 is alone.
         let p = pattern(5, &[(0, 1), (0, 2), (1, 2), (2, 3), (2, 4), (3, 4)]);
         let s = Supervariables::of(&p);
         assert_eq!(s.len(), 3);
         assert_eq!(s.group_of, vec![0, 0, 1, 2, 2]);
         assert_eq!(s.weights(), vec![2, 1, 2]);
         let g = s.compress(&p);
-        // Groups {0, 1}, {2}, {3, 4}: the pairs touch only the middle.
         assert_eq!(g.col_ptr, vec![0, 1, 3, 4]);
         assert_eq!(g.row_idx, vec![1, 0, 2, 1]);
     }
@@ -289,7 +268,6 @@ mod tests {
 
     #[test]
     fn diagonal_presence_does_not_matter() {
-        // Same graph with and without stored diagonal entries.
         let with = pattern(3, &[(0, 1), (0, 2), (1, 2)]);
         let without = CscPattern {
             n: 3,

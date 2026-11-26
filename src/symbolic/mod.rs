@@ -75,7 +75,6 @@ pub struct SymbolicFactorization {
 }
 
 impl SymbolicFactorization {
-    /// Heap bytes held: the permutations, the supernodes and the pattern.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use crate::memory::vec_bytes;
         vec_bytes(&self.perm)
@@ -125,8 +124,6 @@ pub fn analyze_pattern(
     analyze_pattern_from(full, ordering, amalgamation, None)
 }
 
-/// [`analyze_pattern`] with the race's minimum-degree candidate given (see
-/// `race::race`).
 pub(crate) fn analyze_pattern_from(
     full: CscPattern<i32>,
     ordering: &OrderingSettings,
@@ -134,8 +131,6 @@ pub(crate) fn analyze_pattern_from(
     amd: Option<&[usize]>,
 ) -> Result<SymbolicFactorization, RslabError> {
     let method = ordering.method;
-    // The ordering graph (and the compressed graph it may build) is dropped
-    // before the finish.
     let px = {
         let _s = rsprobe::scope!(DEBUG, "ordering");
         let graph = OrderingGraph::new(&full, ordering);
@@ -175,7 +170,6 @@ mod tests {
         try_run(m, s, method).unwrap()
     }
 
-    /// 2D 5-point Laplacian of `k x k`, lower triangle.
     fn grid(k: usize) -> CscMatrix<f64> {
         let (mut r, mut c) = (Vec::new(), Vec::new());
         for y in 0..k {
@@ -204,9 +198,6 @@ mod tests {
         }
     }
 
-    /// Every method returns a consistent analysis: a permutation with its
-    /// inverse, supernodes covering the columns once, heights at least the
-    /// widths.
     #[test]
     fn every_method_gives_a_consistent_analysis() {
         let a = grid(30);
@@ -229,7 +220,6 @@ mod tests {
         }
     }
 
-    /// The race keeps the smallest factor among its candidates.
     #[test]
     fn the_race_is_never_worse_than_its_candidates() {
         let a = grid(40);
@@ -243,9 +233,6 @@ mod tests {
         }
     }
 
-    /// A given minimum-degree ordering takes the place of the race's own:
-    /// given the one the race computes, the analysis is the same; given
-    /// another, the race still keeps the smallest factor.
     #[test]
     fn a_given_minimum_degree_ordering_runs_in_its_place() {
         let a = grid(40);
@@ -271,9 +258,6 @@ mod tests {
         assert!(other.factor_nnz <= run(&a, &s, OrderingMethod::Amf).factor_nnz);
     }
 
-    /// With the gates opened, nested dissection joins a small race and the
-    /// seed ensemble keeps its best seed: never more fill than one seed, and
-    /// the race settings are honoured (a candidate list, bad candidates).
     #[test]
     fn the_race_settings_steer_nested_dissection() {
         let a = grid(40);
@@ -302,24 +286,18 @@ mod tests {
         }
     }
 
-    /// A given permutation is used as is, and rejected when it is not one.
     #[test]
     fn a_given_permutation_is_honoured() {
         let a = grid(10);
         let rev: Vec<usize> = (0..a.n).rev().collect();
         let params = SolverSettings::default().with_permutation(rev.clone().into());
         let s = run(&a, &params, OrderingMethod::Auto);
-        // The postorder may reorder within the tree; the factor size is the
-        // one of the given ordering.
         let direct = run(&a, &params, OrderingMethod::Amd);
         assert_eq!(s.factor_nnz, direct.factor_nnz);
         let bad = SolverSettings::default().with_permutation(vec![0; a.n].into());
         assert!(try_run(&a, &bad, OrderingMethod::Amd).is_err());
     }
 
-    /// The frontal height reported by the analysis equals the row set the
-    /// numeric schedule builds from the pattern, merged supernodes
-    /// included.
     #[test]
     fn supernode_heights_match_the_built_row_sets() {
         use crate::numeric::supernodal::LlSchedule;
@@ -338,10 +316,6 @@ mod tests {
         }
     }
 
-    /// Two unknowns per node of a 2D grid: pairs of indistinguishable
-    /// vertices, so the orderings run on the compressed graph and the
-    /// structure comes from the weighted count. It must equal the structure
-    /// computed on the full pattern under the same ordering.
     #[test]
     fn the_grouped_structure_equals_the_full_one() {
         let (k, d) = (16usize, 2usize);
@@ -387,7 +361,6 @@ mod tests {
         }
     }
 
-    /// A dense pattern is one supernode.
     #[test]
     fn a_dense_pattern_is_one_supernode() {
         let n = 12;
