@@ -1376,8 +1376,8 @@ Settings of the KLU (circuit) path.
 - `par_min_nnz` (int, optional): A fixed gate in place of the time: nonzeros from which the first factor runs its blocks in parallel (no block holding half the columns). Default `None`.
 - `par_min_work` (int, optional): A fixed gate in place of the time: replay work a unit of parallel refactorization must carry, in fmadds (not the unit of `Settings(solve_par_min_work=...)`). Default `None`.
 - `par_min_ratio` (float, optional): With it, the simultaneous work the structure must offer for a parallel refactor. Default `None`.
-- `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 - `threads` (int or 'auto' or ('auto', int) or 'ambient', optional): Workers of the analysis, the factor and its refactors, as for `Settings`: `None` (default) up to 4, an `int` pins the count (`0` = all logical cores), `'auto'` all cores, `('auto', max)` up to `max`, `'ambient'` the caller's rayon pool. A factor or refactor with nothing worth a second thread runs on the calling thread.
+- `interrupt` (Interrupt, optional): A cancellation flag polled by the numeric phase.
 
 #### `KluSettings.to_dict()`
 
