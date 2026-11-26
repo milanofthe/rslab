@@ -704,22 +704,25 @@ impl<T: Scalar> KluSolver<T> {
             pieces.push(std::sync::Mutex::new(run));
             let failed: std::sync::Mutex<Option<(usize, RslabError)>> = std::sync::Mutex::new(None);
             crate::parallel::run_width(pieces.len(), width_blocks, &|q| {
-                let jobs =
-                    std::mem::take(&mut *pieces[q].lock().unwrap_or_else(|e| e.into_inner()));
-                let mut x = Vec::new();
-                let mut cursor = 0;
-                for job in jobs {
-                    let b = job.b;
-                    let at = plan_at(&mut cursor, b);
-                    let r = interrupt_check(int_flag).and_then(|()| replay_block(job, &mut x, at));
-                    if let Err(e) = r {
-                        let mut slot = failed.lock().unwrap_or_else(|e| e.into_inner());
-                        if slot.as_ref().is_none_or(|(b0, _)| b < *b0) {
-                            *slot = Some((b, e));
+                let mut jobs = Some(std::mem::take(
+                    &mut *pieces[q].lock().unwrap_or_else(|e| e.into_inner()),
+                ));
+                // a kept zero work vector of this worker's, not one per run
+                with_work(q, &mut |x: &mut Vec<T>| {
+                    let mut cursor = 0;
+                    for job in jobs.take().into_iter().flatten() {
+                        let b = job.b;
+                        let at = plan_at(&mut cursor, b);
+                        let r = interrupt_check(int_flag).and_then(|()| replay_block(job, x, at));
+                        if let Err(e) = r {
+                            let mut slot = failed.lock().unwrap_or_else(|e| e.into_inner());
+                            if slot.as_ref().is_none_or(|(b0, _)| b < *b0) {
+                                *slot = Some((b, e));
+                            }
+                            return;
                         }
-                        return;
                     }
-                }
+                });
             });
             if let Some((_, e)) = failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
                 return Err(e);
