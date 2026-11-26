@@ -29,9 +29,8 @@ pub const DENSE_DEGREE_MIN: usize = 16;
 pub const ELBOW_DIV: usize = 5;
 
 /// Scores above `n` share degree buckets in steps of `n / BUCKET_STEP_DIV`
-/// (1). The AMF bucket of `algo` and the minimum-fill metric must use the
-/// same step.
-/// Used by: `quotient_graph::algo::amf_bucket_of`, `MinFill::bucket`.
+/// (1).
+/// Used by: `quotient_graph::algo::amf_bucket_of`.
 /// Why: tuned default; fill scores above `n` need only coarse buckets.
 /// Contract: results (ties between equal-bucket candidates).
 pub const BUCKET_STEP_DIV: usize = 8;

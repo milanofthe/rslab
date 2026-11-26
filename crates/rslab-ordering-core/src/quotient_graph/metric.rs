@@ -1,87 +1,70 @@
 //! Selection-metric trait abstracting AMD vs AMF differences.
 //!
-//! The shared quotient-graph machinery (`Workspace`, `select_pivot`,
-//! `create_element`, `finalize_step`, hash-based supervariable
-//! detection, mass elimination, aggressive absorption) is identical
-//! across AMD and AMF. The metrics differ in:
+//! The elimination loop ([`super::run_elimination`]), the workspace and
+//! the final postorder are shared by AMD and AMF. The metrics differ in:
 //!
-//! 1. **Initial score** seeded from each row's adjacency length.
-//!    AMD: identity. AMF: identity (both = `len`).
-//! 2. **Bucket array length.** AMD: `n` (degrees `0..n` indexable;
+//! 1. **Bucket array length.** AMD: `n` (degrees `0..n` indexable;
 //!    `select_pivot` scans `while deg < n`). AMF: `2 * n + 2` because
 //!    the quantized RMF can exceed `n`.
-//! 3. **Bucket index for a score.** AMD: identity. AMF: identity for
-//!    `s <= n`, then coarse stride `PAS = max(n / 8, 1)` above.
-//! 4. **Pivot selection within a bucket.** AMD: head only.
-//!    AMF: linear scan when the bucket is in the coarse region.
-//! 5. **Score on supervariable merge.** AMD: no-op (only `nv[i]`
-//!    accumulates). AMF: `score[i] = max(score[i], score[j])`.
-//! 6. **Score finalisation** at the end of Pass-2: AMD's loose-degree
+//! 2. **Pivot selection.** AMD takes the head of the lowest non-empty
+//!    bucket. AMF linear-scans a bucket in the coarse region (scores
+//!    above `n` share buckets with stride `PAS = max(n / 8, 1)`).
+//! 3. **Element construction.** AMD unlinks absorbed neighbours from
+//!    the bucket `degree[i]`, AMF from the quantized bucket of `wf[i]`.
+//! 4. **Score finalisation** at the end of Pass-2: AMD's loose-degree
 //!    formula `min(deg_prev, scan2_deg) + degme - nvi` clamped at
-//!    `nleft - nvi`; AMF's quantized RMF (Amestoy 1999 thesis).
+//!    `nleft - nvi`; AMF's quantized RMF (Amestoy 1999 thesis) with
+//!    the supervariable max-merge of `wf`.
 //!
-//! The trait below covers (1)-(5). Site (6) is metric-specific in the
-//! Pass-2 inner loop and is reached via the `run_elimination`
-//! dispatch - each metric impl wires its own concrete loop in
-//! `algo.rs` (AMD: `run_elimination`, AMF: `run_elimination_amf`).
-//! The trait stays light: keeping the inner loops as parallel
-//! concrete functions trades ~300 LoC duplication for zero risk to
-//! AMD's bit-identity with SuiteSparse.
+//! Sites (2)-(4) are the step functions of `algo.rs` (`select_pivot`,
+//! `create_element`, `finalize_step` and their `_amf` counterparts).
+//! They stay parallel concrete functions so that the AMD path stays
+//! bit-identical to SuiteSparse; the trait selects them statically.
 //!
 //! Reference: Amestoy (1999) habilitation thesis; MUMPS HAMF4.
 
-use super::algo::{run_elimination as run_elimination_amd, run_elimination_amf, StepFlops};
+use super::algo::{
+    create_element, create_element_amf, finalize_step, finalize_step_amf, select_pivot,
+    select_pivot_amf, StepFlops,
+};
 use super::workspace::Workspace;
 use crate::OrderingError;
-use crate::Progress;
 
 /// Selection metric for an AMD-family bottom-up ordering.
 ///
-/// All methods are zero-overhead `#[inline(always)]` no-ops or
-/// identity functions in the AMD case; AMF (`MinFill`) provides
-/// non-trivial implementations. The trait is consumed at the
-/// `run_elimination` dispatch point and at the bucket-allocation
-/// dispatch in [`crate::quotient_graph::order`]; the metric-specific
-/// inner-loop sites are inlined into the concrete `run_elimination_*`
-/// functions in `algo.rs`.
+/// The methods are the metric-specific steps of
+/// [`super::run_elimination`], which is monomorphized per metric.
 pub trait Metric {
-    /// Bucket key produced by the selection metric. AMD uses `i32`
-    /// (the running degree); AMF will also use `i32` (quantized RMF).
-    type Score: Copy + Ord + Default;
-
     /// Length of the bucket head array `Workspace::head`. AMD: `n`
     /// (indexed up to `n - 1` by `select_pivot`'s `while deg < n`).
     /// AMF: `2 * n + 2`.
     fn n_buckets(n: usize) -> usize;
 
-    /// Initial score for a freshly-loaded variable with adjacency
-    /// length `len`. AMD and AMF both seed `len`.
-    fn init_score(len: i32) -> Self::Score;
+    /// Pick and unlink the next pivot, or `None` if no live bucket is
+    /// left.
+    fn select_pivot(ws: &mut Workspace) -> Option<usize>;
 
-    /// Bucket index for the given score. AMD: identity. AMF: identity
-    /// for `s <= n`, coarse-stride above.
-    fn bucket(score: Self::Score, n: usize) -> usize;
-
-    /// Whether `idx` falls in the "coarse" bucket region - i.e.
-    /// `select_pivot` must linear-scan the bucket chain to pick the
-    /// minimum-score entry, rather than just taking the head. AMD
-    /// always returns `false`; AMF returns `idx > n`.
-    fn coarse_bucket(idx: usize, n: usize) -> bool;
-
-    /// Update `parent`'s score on supervariable merge of `child` into
-    /// `parent`. AMD: no-op. AMF: `*parent = max(*parent, child)`.
-    fn merge_supervariable(parent: &mut Self::Score, child: Self::Score);
-
-    /// Run the metric's elimination loop on a freshly initialised
-    /// `Workspace`. Returns the accumulated flop counters.
-    ///
-    /// MinDegree dispatches to `run_elimination` (the AMD-specific
-    /// loop); MinFill dispatches to `run_elimination_amf`.
-    fn run_elimination(
+    /// Build the new element of pivot `me`. Returns
+    /// `(pme1, pme2, nvpiv, degme)`.
+    fn create_element(
         ws: &mut Workspace,
+        me: usize,
+    ) -> Result<(usize, usize, i32, usize), OrderingError>;
+
+    /// Update the scores of the element's variables, detect
+    /// supervariables and re-insert them into the buckets. Returns the
+    /// flops of the step.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_step(
+        ws: &mut Workspace,
+        me: usize,
+        pme1: usize,
+        pme2_excl: usize,
+        nvpiv: i32,
+        degme: usize,
+        elenme: i32,
         aggressive: bool,
-        progress: Option<&Progress>,
-    ) -> Result<StepFlops, OrderingError>;
+    ) -> StepFlops;
 }
 
 /// Minimum-degree metric - the AMD selection rule of Amestoy, Davis,
@@ -95,38 +78,36 @@ pub trait Metric {
 pub struct MinDegree;
 
 impl Metric for MinDegree {
-    type Score = i32;
-
     #[inline(always)]
     fn n_buckets(n: usize) -> usize {
         n
     }
 
     #[inline(always)]
-    fn init_score(len: i32) -> i32 {
-        len
+    fn select_pivot(ws: &mut Workspace) -> Option<usize> {
+        select_pivot(ws)
     }
 
     #[inline(always)]
-    fn bucket(score: i32, _n: usize) -> usize {
-        score as usize
-    }
-
-    #[inline(always)]
-    fn coarse_bucket(_idx: usize, _n: usize) -> bool {
-        false
-    }
-
-    #[inline(always)]
-    fn merge_supervariable(_parent: &mut i32, _child: i32) {}
-
-    #[inline(always)]
-    fn run_elimination(
+    fn create_element(
         ws: &mut Workspace,
+        me: usize,
+    ) -> Result<(usize, usize, i32, usize), OrderingError> {
+        create_element(ws, me)
+    }
+
+    #[inline(always)]
+    fn finalize_step(
+        ws: &mut Workspace,
+        me: usize,
+        pme1: usize,
+        pme2_excl: usize,
+        nvpiv: i32,
+        degme: usize,
+        elenme: i32,
         aggressive: bool,
-        progress: Option<&Progress>,
-    ) -> Result<StepFlops, OrderingError> {
-        run_elimination_amd(ws, aggressive, progress)
+    ) -> StepFlops {
+        finalize_step(ws, me, pme1, pme2_excl, nvpiv, degme, elenme, aggressive)
     }
 }
 
@@ -137,66 +118,49 @@ impl Metric for MinDegree {
 /// KKT graphs with a few "hub" rows AMF can give well over an order of
 /// magnitude less `nnz_L` than AMD.
 ///
-/// Score is a quantized `RMF = DEG*(DEG-1+2*DEGME) - WF(i)` value
-/// stored in `i32`. Buckets up to and including `NORIG = n` are one
-/// bucket per integer score; above `NORIG` the buckets quantize with
-/// stride `PAS = max(n / 8, 1)` and the head must be linear-scanned
-/// to pick the minimum-RMF entry. Supervariable absorption merges
-/// the per-supervariable WF with `max`.
+/// Score is a quantized `RMF = DEG*(DEG-1+2*DEGME) - WF(i)` value.
+/// Buckets up to and including `NORIG = n` are one bucket per integer
+/// score; above `NORIG` the buckets quantize with stride
+/// `PAS = max(n / 8, 1)` and the head must be linear-scanned to pick
+/// the minimum-RMF entry. Supervariable absorption merges the
+/// per-supervariable WF with `max`.
 ///
-/// **Inner loop**: [`MinFill::run_elimination`] dispatches to
-/// `run_elimination_amf`.
 /// The lazy WF(e) cache, three-accumulator Pass-2, supervariable
 /// max-merge of `wf`, saturated/regular RMF branch, and coarse-bucket
-/// linear scan all live in `algo.rs`.
+/// linear scan all live in the `_amf` step functions of `algo.rs`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MinFill;
 
 impl Metric for MinFill {
-    type Score = i32;
-
     #[inline(always)]
     fn n_buckets(n: usize) -> usize {
         2 * n + 2
     }
 
     #[inline(always)]
-    fn init_score(len: i32) -> i32 {
-        len
-    }
-
-    #[inline]
-    fn bucket(score: i32, n: usize) -> usize {
-        if score <= 0 {
-            return 0;
-        }
-        let s = score as usize;
-        if s <= n {
-            return s;
-        }
-        let pas = (n / crate::constants::BUCKET_STEP_DIV).max(1);
-        let nbbuck = 2 * n;
-        let coarse = (s - n) / pas + n;
-        coarse.min(nbbuck)
+    fn select_pivot(ws: &mut Workspace) -> Option<usize> {
+        select_pivot_amf(ws)
     }
 
     #[inline(always)]
-    fn coarse_bucket(idx: usize, n: usize) -> bool {
-        idx > n
-    }
-
-    #[inline(always)]
-    fn merge_supervariable(parent: &mut i32, child: i32) {
-        if child > *parent {
-            *parent = child;
-        }
-    }
-
-    fn run_elimination(
+    fn create_element(
         ws: &mut Workspace,
+        me: usize,
+    ) -> Result<(usize, usize, i32, usize), OrderingError> {
+        create_element_amf(ws, me)
+    }
+
+    #[inline(always)]
+    fn finalize_step(
+        ws: &mut Workspace,
+        me: usize,
+        pme1: usize,
+        pme2_excl: usize,
+        nvpiv: i32,
+        degme: usize,
+        elenme: i32,
         aggressive: bool,
-        progress: Option<&Progress>,
-    ) -> Result<StepFlops, OrderingError> {
-        run_elimination_amf(ws, aggressive, progress)
+    ) -> StepFlops {
+        finalize_step_amf(ws, me, pme1, pme2_excl, nvpiv, degme, elenme, aggressive)
     }
 }

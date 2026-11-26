@@ -181,7 +181,7 @@ pub fn amd_order_substages(
     let workspace_new_us = t.elapsed().as_micros() as u64;
 
     let t = Instant::now();
-    let _flops = run_elimination(&mut ws, opts.aggressive, opts.progress.as_ref())?;
+    let _flops = run_elimination::<MinDegree>(&mut ws, opts.aggressive, opts.progress.as_ref())?;
     let run_elimination_us = t.elapsed().as_micros() as u64;
 
     let t = Instant::now();
