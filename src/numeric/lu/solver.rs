@@ -57,17 +57,18 @@ fn symmetrized_lower_pattern<T: Scalar>(
         rest = tail;
     }
     let sorts = crate::parallel::Work::of(start[n] as f64, &SYMMETRIZE_RATE);
-    let kept: Vec<usize> = crate::parallel::map_owned(buckets, sorts, |seg| {
-        seg.sort_unstable();
-        let mut len = 0;
-        for p in 0..seg.len() {
-            if len == 0 || seg[p] != seg[len - 1] {
-                seg[len] = seg[p];
-                len += 1;
+    let kept: Vec<usize> =
+        crate::parallel::map_owned::<crate::parallel::Rayon, _, _>(buckets, sorts, |seg| {
+            seg.sort_unstable();
+            let mut len = 0;
+            for p in 0..seg.len() {
+                if len == 0 || seg[p] != seg[len - 1] {
+                    seg[len] = seg[p];
+                    len += 1;
+                }
             }
-        }
-        len
-    });
+            len
+        });
     let mut col_ptr = Vec::with_capacity(n + 1);
     col_ptr.push(0);
     let mut len = 0;

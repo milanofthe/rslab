@@ -9,9 +9,6 @@ print = ['^python/src/logging\.rs: .*eprintln!\("rslab \{\}", event\.line\(&path
 unwrap = [
     '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid symmetric triplets: \{e\}"\)',
     '^src/matgen/mod\.rs: .*panic!\("matgen: internal invariant - invalid triplets: \{e\}"\)',
-    '^src/parallel\.rs: .*unreachable!\("every item is mapped"\)',
-    '^src/parallel\.rs: .*unreachable!\("a pool runs what it enters"\)',
-    '^src/parallel\.rs: .*unreachable!\("a pool runs the body of its scope"\)',
 ]
 duplicate = [
     '^python/src/symbolic\.rs: .*fn heap_bytes\(&self\) -> u64',

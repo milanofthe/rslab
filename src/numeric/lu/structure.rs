@@ -120,23 +120,27 @@ impl LuStructure {
             let seeds: Vec<_> = (level.iter())
                 .map(|&s| (s, std::mem::take(&mut ext[s])))
                 .collect();
-            let built = crate::parallel::map_owned(seeds, work, |(s, (mut l, mut u))| {
-                let (first, last) = (sym.supernodes[s].first_col, end(s));
-                for &k in sched.updaters(s) {
-                    let (lk, uk) = &ext[k as usize];
-                    if Self::hits(uk, first, last) {
-                        l.extend(lk.iter().filter(|&&g| g as usize >= last));
+            let built = crate::parallel::map_owned::<crate::parallel::Rayon, _, _>(
+                seeds,
+                work,
+                |(s, (mut l, mut u))| {
+                    let (first, last) = (sym.supernodes[s].first_col, end(s));
+                    for &k in sched.updaters(s) {
+                        let (lk, uk) = &ext[k as usize];
+                        if Self::hits(uk, first, last) {
+                            l.extend(lk.iter().filter(|&&g| g as usize >= last));
+                        }
+                        if Self::hits(lk, first, last) {
+                            u.extend(uk.iter().filter(|&&g| g as usize >= last));
+                        }
                     }
-                    if Self::hits(lk, first, last) {
-                        u.extend(uk.iter().filter(|&&g| g as usize >= last));
+                    for v in [&mut l, &mut u] {
+                        v.sort_unstable();
+                        v.dedup();
                     }
-                }
-                for v in [&mut l, &mut u] {
-                    v.sort_unstable();
-                    v.dedup();
-                }
-                (l, u)
-            });
+                    (l, u)
+                },
+            );
             for (&s, lu) in level.iter().zip(built) {
                 ext[s] = lu;
             }

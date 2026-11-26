@@ -63,7 +63,7 @@ serde_json = "1"
 num-complex = "0.4"
 # Work stealing for the assembly-tree drivers, the orderings and the solves.
 rayon = "1.10"
-rspool = { git = "https://github.com/milanofthe/rspool", rev = "022eb55", version = "0.1.0", features = ["rayon"] }
+rspool = { git = "https://github.com/milanofthe/rspool", rev = "34c098c", version = "0.1.0", features = ["rayon"] }
 # Scopes, measures and events of the solver phases; the revision rspool pins.
 # Records only in a binary that enables `rsprobe/on`.
 rsprobe = { git = "https://github.com/milanofthe/rsprobe", rev = "2bff946", version = "0.1.0" }
