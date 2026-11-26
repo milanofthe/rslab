@@ -39,6 +39,7 @@ pub(crate) fn max_transversal(
     hk_transversal(n, col_ptr, row_idx, true)
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 pub(crate) fn hk_transversal(
     n: usize,
     col_ptr: &[usize],
@@ -50,6 +51,7 @@ pub(crate) fn hk_transversal(
     let mut col_of_row = vec![UNMATCHED; n];
     let mut n_matched = 0usize;
 
+    // https://github.com/milanofthe/rslab/issues/291
     if diag_seed {
         for j in 0..n {
             for &r in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
@@ -293,6 +295,7 @@ pub(crate) fn matching_candidates(
     if k1 != n {
         return None;
     }
+    // https://github.com/milanofthe/rslab/issues/291
     if m1.iter().enumerate().all(|(j, &r)| r == j) {
         return Some(vec![m1]);
     }
@@ -332,6 +335,7 @@ pub(crate) fn block_triangular_form(
     Some(btf_from_matching(n, col_ptr, row_idx, row_match))
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 pub(crate) fn btf_from_matching(
     n: usize,
     col_ptr: &[usize],

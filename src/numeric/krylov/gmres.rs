@@ -76,6 +76,7 @@ where
     let mut total = 0usize;
     let mut w = vec![T::zero(); n];
     let mut ax = vec![T::zero(); n];
+    // https://github.com/milanofthe/rslab/issues/287
     let mut v = basis(n * (m + 1));
     let mut zb = basis(n * m);
     let mut h = vec![T::zero(); (m + 1) * m];
@@ -85,6 +86,7 @@ where
     let mut y = vec![T::zero(); m];
 
     let mut final_res;
+    // https://github.com/milanofthe/rslab/issues/287
     loop {
         op.apply(&x, &mut ax);
         let r: Vec<T> = (0..n).map(|i| b[i] - ax[i]).collect();
@@ -128,6 +130,7 @@ where
                 }
             }
             let mut hn = norm2(&w);
+            // https://github.com/milanofthe/rslab/issues/287
             if hn < reorth_eta * wnorm0 {
                 for i in 0..=j {
                     let s = dotc(&v[i * n..i * n + n], &w);

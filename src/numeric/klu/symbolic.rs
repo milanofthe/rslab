@@ -53,6 +53,7 @@ impl KluSymbolic {
             let form = btf::btf_from_matching(n, &a.col_ptr, &a.row_idx, m);
             order_blocks(a, form)?
         } else if settings.btf {
+            // https://github.com/milanofthe/rslab/issues/290
             let cands = btf::matching_candidates(n, &a.col_ptr, &a.row_idx)
                 .ok_or(RslabError::StructurallySingular)?;
             let mut best: Option<OrderedForm> = None;
@@ -122,6 +123,7 @@ impl KluSymbolic {
         })
     }
 
+    // https://github.com/milanofthe/rslab/issues/290
     fn symbolic_fill(&self) -> &KluFill {
         self.fill.get_or_init(|| self.symbolic_fill_uncached())
     }
@@ -494,6 +496,7 @@ impl KluSymbolic {
             diagnostics,
             solves: Default::default(),
             works: Default::default(),
+            // https://github.com/milanofthe/rslab/issues/290
             solve_threads: crate::numeric::settings::Threads::Fixed(1),
         })
     }
@@ -507,6 +510,7 @@ struct OrderedForm {
     estimate: KluEstimate,
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 fn order_blocks<T: Scalar>(
     a: &GeneralCsc<T>,
     form: btf::BtfForm,

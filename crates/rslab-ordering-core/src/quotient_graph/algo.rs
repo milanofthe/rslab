@@ -251,6 +251,7 @@ pub fn create_element(
     ws.elen[me] = flip(nvpiv + degme as i32);
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
+    // https://github.com/milanofthe/rslab/issues/291
     let pme2_excl: usize = if pme2 < pme1 as i32 {
         pme1
     } else {
@@ -562,6 +563,7 @@ fn amf_wf_combine(wf4: i64, nvi: i64, wf3: i64) -> i64 {
     wf4 + 2 * nvi * wf3
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 const AMF_DUMMY_I32: i32 = i32::MAX - 1;
 
 /// AMF analogue of [`select_pivot`]. Linear-scans coarse buckets
@@ -826,6 +828,7 @@ pub fn finalize_step_amf(
                     we -= nvi;
                 } else if we != 0 {
                     we = ws.degree[e] + wnvi;
+                    // https://github.com/milanofthe/rslab/issues/291
                     ws.wf[e] = 0;
                 }
                 ws.w[e] = we;

@@ -51,6 +51,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
     let lay = Layout::new(ncol, nrow - ncol);
     debug_assert_eq!(panel.len(), lay.len());
 
+    // https://github.com/milanofthe/rslab/issues/288
     let gloc = crate::numeric::supernodal::Gloc::new(n, sched.rows(s));
     for p in 0..ncol {
         let c = first + p;
@@ -315,6 +316,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                 }
             } else {
                 crate::memory::grow(vd_buf, npk * nck);
+                // https://github.com/milanofthe/rslab/issues/288
                 let mut ck = 0;
                 while ck < nck {
                     if two_k[ck] {
@@ -334,6 +336,7 @@ pub(super) fn ll_factor_node<T: Scalar>(
                         ck += 1;
                     }
                 }
+                // https://github.com/milanofthe/rslab/issues/288
                 let mrows = nok - p0;
                 crate::memory::grow(u_buf, mrows * npk);
                 // SAFETY: lhs (`pk` off-diag block from row p0, read), rhs

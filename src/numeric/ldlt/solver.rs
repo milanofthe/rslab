@@ -224,6 +224,7 @@ fn onepass_scale<T: Scalar>(a: &CscMatrix<T>) -> Vec<f64> {
         .collect()
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 fn equilibration<T: Scalar>(
     a: &CscMatrix<T>,
     strategy: &crate::scaling::ScalingStrategy,
@@ -350,6 +351,7 @@ impl LdltSymbolic {
             .unwrap_or(0)
     }
 
+    // https://github.com/milanofthe/rslab/issues/288
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         self.est_cache.get::<T>(|| self.estimate_memory_for::<T>())
     }
@@ -680,6 +682,7 @@ mod tests {
         assert!(backward_error(&a, &x, &b) <= solve_backward_error(a.n, U64));
     }
 
+    // https://github.com/milanofthe/rslab/issues/288
     #[cfg(feature = "matgen")]
     #[test]
     fn race_finds_nd_class_win_on_curl_curl() {

@@ -745,6 +745,7 @@ pub(crate) fn in_scoped_pool<R: Send>(
     stack_bytes: usize,
     f: impl FnOnce() -> R + Send,
 ) -> R {
+    // https://github.com/milanofthe/rslab/issues/290
     if crate::parallel::is_lent() || (stack_bytes == 0 && on_own_worker()) {
         return f();
     }
@@ -760,6 +761,7 @@ pub(crate) fn in_scoped_pool<R: Send>(
     }
     match scoped_pool(n, stack_bytes) {
         Some(pool) => enter(&pool, || {
+            // https://github.com/milanofthe/rslab/issues/290
             crate::parallel::prepare();
             f()
         }),
@@ -775,6 +777,7 @@ fn on_own_worker() -> bool {
     OWN_WORKER.with(std::cell::Cell::get)
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 pub(crate) fn enter<R: Send>(pool: &rayon::ThreadPool, f: impl FnOnce() -> R + Send) -> R {
     let f = crate::parallel::carried(f);
     if rayon::current_thread_index().is_none() || pool.current_thread_index().is_some() {
@@ -896,6 +899,7 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 pub(crate) fn scoped_pool(
     n: usize,
     stack_bytes: usize,

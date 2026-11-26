@@ -237,6 +237,7 @@ impl Scalar for f64 {
 
 macro_rules! complex_methods {
     ($real:ident) => {
+        // https://github.com/milanofthe/rslab/issues/292
         #[inline]
         fn mul_add(self, a: Self, b: Self) -> Self {
             let re = $real::mul_add(self.re, a.re, $real::mul_add(-self.im, a.im, b.re));
@@ -446,6 +447,7 @@ impl Scalar for Complex<f32> {
         Complex::new(r as f32, 0.0)
     }
 
+    // https://github.com/milanofthe/rslab/issues/292
     #[inline]
     fn magnitude(self) -> f64 {
         (self.re as f64).hypot(self.im as f64)

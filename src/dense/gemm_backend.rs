@@ -56,6 +56,7 @@ pub unsafe fn gemm<T: Scalar>(
     let parallel = !matches!(mode.parallelism, gemm::Parallelism::None);
     let on_lent_pool = parallel && crate::parallel::is_lent();
     let on_one_thread_pool = on_lent_pool && crate::parallel::threads() < 2;
+    // https://github.com/milanofthe/rslab/issues/289
     if on_one_thread_pool {
         let one = GemmMode {
             parallelism: gemm::Parallelism::Rayon(1),
@@ -186,6 +187,7 @@ pub trait SplitReal:
     fn one() -> Self;
     fn with_planes<F: FnOnce(&mut Vec<Self>) -> Ret, Ret>(f: F) -> Ret;
 }
+// https://github.com/milanofthe/rslab/issues/289
 fn with_taken<R: SplitReal, Ret>(
     cell: &'static std::thread::LocalKey<RefCell<Planes<R>>>,
     f: impl FnOnce(&mut Vec<R>) -> Ret,

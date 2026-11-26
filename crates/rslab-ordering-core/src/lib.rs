@@ -117,6 +117,7 @@ impl<'a> CscPattern<'a> {
                 return None;
             }
         }
+        // https://github.com/milanofthe/rslab/issues/291
         for w in col_ptr.windows(2) {
             let lo = w[0] as usize;
             let hi = w[1] as usize;

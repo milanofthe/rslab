@@ -77,6 +77,7 @@ fn _rslab(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+// https://github.com/milanofthe/rslab/issues/292
 #[cfg(not(feature = "alloc-stats"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

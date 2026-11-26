@@ -338,6 +338,7 @@ impl<T: Scalar> PanelArena<T> {
         Self::with(slots, vals, row_slot_ptr, rows, false, reused)
     }
 
+    // https://github.com/milanofthe/rslab/issues/289
     /// Slots of `nsuper` supernodes claimed as their fronts start
     /// ([`claim`](Self::claim)), together at most `room` values.
     pub fn lazy(nsuper: usize, room: usize) -> Self {
@@ -577,6 +578,7 @@ impl<T: Scalar> PanelArena<T> {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) fn release_room<T>(v: &mut Vec<T>) {
     if 2 * v.len() >= v.capacity() {
         v.shrink_to_fit();

@@ -344,6 +344,7 @@ fn parse_mtx_with<T: Scalar>(
     }
     let n = rows;
 
+    // https://github.com/milanofthe/rslab/issues/292
     let mut entries = Vec::with_capacity(nnz.min(contents.len()));
     for (line_no, line) in lines {
         let trimmed = line.trim();

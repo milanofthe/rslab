@@ -53,6 +53,7 @@ mod twosided;
 
 pub(crate) use twosided::equilibrate_general;
 
+// https://github.com/milanofthe/rslab/issues/291
 #[inline]
 pub(crate) fn kr_guarded_update(d: f64, m: f64) -> f64 {
     let cand = d / m.sqrt();

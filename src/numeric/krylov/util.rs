@@ -7,6 +7,7 @@ use crate::parallel::{Disjoint, Rayon};
 use crate::scalar::Scalar;
 use crate::stored::{axpy_as, dotc_as, Rows, Stored};
 
+// https://github.com/milanofthe/rslab/issues/287
 pub(super) fn basis<T: Scalar>(cap: usize) -> Vec<T> {
     Vec::with_capacity(cap)
 }
@@ -48,6 +49,7 @@ pub(super) fn givens<T: Scalar>(f: T, g: T) -> (T, T) {
     (f * inv, g * inv)
 }
 
+// https://github.com/milanofthe/rslab/issues/287
 #[inline]
 pub(super) fn well_conditioned_dim<T: Scalar>(h: &[T], stride: usize, jdim: usize) -> usize {
     if jdim == 0 {

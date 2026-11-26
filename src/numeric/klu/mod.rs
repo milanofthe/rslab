@@ -51,6 +51,7 @@ pub use settings::{KluParallel, KluSettings};
 
 const UNSET: usize = usize::MAX;
 
+// https://github.com/milanofthe/rslab/issues/290
 type Ki = u32;
 const KI_UNSET: Ki = Ki::MAX;
 const KI_FBIT: Ki = 1 << (Ki::BITS - 1);
@@ -196,6 +197,7 @@ struct BlockPlan {
     level_work: Vec<u64>,
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 #[derive(Debug, Default)]
 struct Ready {
     epoch: u32,

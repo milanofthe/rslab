@@ -1,5 +1,6 @@
 name: ci
 
+# https://github.com/milanofthe/rslab/issues/292
 on:
   push:
     branches: [main]
@@ -11,6 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # https://github.com/milanofthe/rslab/issues/292
   RUSTFLAGS: -C target-cpu=x86-64-v3
 
 jobs:
@@ -29,6 +31,7 @@ jobs:
       - name: cache, seeded by failed runs too
         uses: Swatinem/rust-cache@v2
         with:
+          # https://github.com/milanofthe/rslab/issues/292
           cache-on-failure: true
           workspaces: |
             . -> target
@@ -37,6 +40,7 @@ jobs:
       - name: rustfmt
         run: cargo fmt --check
 
+      # https://github.com/milanofthe/rslab/issues/292
       - name: python lock matches the manifests
         run: cargo metadata --locked --format-version 1 --manifest-path python/Cargo.toml > /dev/null
 
@@ -51,5 +55,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # https://github.com/milanofthe/rslab/issues/292
       - name: test (matgen superset)
         run: cargo test --features matgen,rsprobe/alloc

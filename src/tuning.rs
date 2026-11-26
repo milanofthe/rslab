@@ -104,6 +104,7 @@ impl Calibration {
         c
     }
 
+    // https://github.com/milanofthe/rslab/issues/292
     fn load(fp: u64) -> Option<Self> {
         let s = std::fs::read_to_string(Self::cache_path(fp)).ok()?;
         let mut it = s.split_whitespace();
@@ -211,6 +212,7 @@ impl Calibration {
         let t1 = mean;
         let geom_gflops = (flops / t1.max(TIME_FLOOR)) / GIGA;
 
+        // https://github.com/milanofthe/rslab/issues/292
         let ab = grid3d_spd::<Complex<f64>>(CALIB_GRID_LARGE);
         let opts_nd =
             SolverSettings::default().with_ordering(crate::symbolic::OrderingMethod::MetisND);
@@ -223,6 +225,7 @@ impl Calibration {
             symb.factor(&ab, &opts).ok()?;
             Some(start.elapsed().as_secs_f64())
         };
+        // https://github.com/milanofthe/rslab/issues/292
         if time_b(hw.physical_cores.max(1)).is_none() {
             return Self::fallback(hw);
         }
@@ -340,6 +343,7 @@ pub fn recommend_threads_cost_model(
     };
     let mut best_t = 1;
     let mut best = time(1);
+    // https://github.com/milanofthe/rslab/issues/292
     for t in THREAD_LADDER.into_iter().filter(|&t| t <= cap) {
         let tt = time(t);
         if tt < best * THREAD_GAIN_MARGIN {

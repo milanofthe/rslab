@@ -23,6 +23,7 @@ pub(crate) fn emit_refcount_offsets(
     (refcount, e_offset)
 }
 
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) type Li = u32;
 
 pub(crate) struct LlSchedule {

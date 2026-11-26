@@ -8,6 +8,7 @@ use crate::test_constants::{
     fixed_refinement, forward_error, gamma, solve_backward_error, varah_condition, U64, UC32, UC64,
 };
 
+// https://github.com/milanofthe/rslab/issues/288
 #[test]
 fn lu_matching_bounds_pivot_growth() {
     let m = 40usize;
@@ -74,6 +75,7 @@ fn lu_matching_bounds_pivot_growth() {
     assert!(s0.is_err() || s0.unwrap().diagnostics().decisions.scaling == "TwoSidedRowCol");
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[test]
 fn iterated_equilibration_lifts_the_floored_pivots() {
     use crate::scaling::ScalingStrategy;
@@ -253,6 +255,7 @@ fn lu_solve_many_matches_single() {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[test]
 fn lu_block_solve_is_the_single_solve_to_rounding() {
     let mut seed = 12345u64;
@@ -985,6 +988,7 @@ mod fingerprint {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[cfg(feature = "matgen")]
 #[test]
 fn analyses_match_the_recorded_fingerprints() {

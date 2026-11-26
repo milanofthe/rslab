@@ -152,6 +152,7 @@ pub(crate) fn analyze_with(
     amd: Option<&[usize]>,
 ) -> Result<SupernodalAnalysis, RslabError> {
     let n = pattern.n;
+    // https://github.com/milanofthe/rslab/issues/289
     opts.threads.run(
         stack_for_depth(n),
         |cap| cap,
@@ -179,6 +180,7 @@ fn analyze_with_inner(
         let _s = rsprobe::scope!(DEBUG, "schedule");
         LlSchedule::build(&sym)
     };
+    // https://github.com/milanofthe/rslab/issues/289
     sym.pattern = CscPattern {
         n,
         col_ptr: Vec::new(),

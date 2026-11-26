@@ -295,6 +295,7 @@ fn orthonormalize_columns<T: Scalar>(v: &mut [T], n: usize, nc: usize) -> usize 
 }
 
 // https://doi.org/10.1137/040607277
+// https://github.com/milanofthe/rslab/issues/287
 #[allow(clippy::too_many_arguments)]
 fn recompute_recycle<T: RecycleScalar>(
     cmat: &[T],
@@ -497,6 +498,7 @@ where
             continue;
         }
 
+        // https://github.com/milanofthe/rslab/issues/287
         let p_arn = m;
         let inv_beta = T::from_real(1.0 / beta);
         let mut vb = vec![T::zero(); n * (p_arn + 1)];

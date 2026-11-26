@@ -140,6 +140,7 @@ pub fn find_supernodes(
     let mut merged_into = vec![None::<usize>; n_snodes];
     let mut snode_first_col: Vec<usize> = snode_starts;
 
+    // https://github.com/milanofthe/rslab/issues/291
     let mut snode_nrow: Vec<usize> = (0..n_snodes)
         .map(|s| col_counts[snode_first_col[s]].max(snode_ncols[s]))
         .collect();
@@ -167,6 +168,7 @@ pub fn find_supernodes(
             let s_first = snode_first_col[root_s];
             let s_ncol = snode_ncols[root_s];
             let p_first = snode_first_col[root_p];
+            // https://github.com/milanofthe/rslab/issues/291
             if s_first + s_ncol != p_first {
                 continue;
             }
@@ -183,6 +185,7 @@ pub fn find_supernodes(
 
             let parent_is_root = snode_parent[root_p].is_none();
             let merged_ncol = child_ncol + parent_ncol;
+            // https://github.com/milanofthe/rslab/issues/291
             let root_cap = if n >= params.root_cap_min_n {
                 ((n as f64 * params.root_cap_fraction) as usize).min(params.root_cap_max)
             } else {
@@ -190,6 +193,7 @@ pub fn find_supernodes(
             };
             let root_cap_exceeded = parent_is_root && merged_ncol > root_cap;
 
+            // https://github.com/milanofthe/rslab/issues/291
             let relaxed = relax_width.is_some_and(|w| {
                 let child_last = s_first + s_ncol - 1;
                 let extra = col_counts[child_last].saturating_sub(1 + col_counts[p_first]);

@@ -165,6 +165,7 @@ def _normalize_dtype(data: np.ndarray) -> np.ndarray:
     return data.astype(np.float64)
 
 
+# https://github.com/milanofthe/rslab/issues/292
 def _lower_csc(A):
     sp = _require_scipy()
     A = sp.csc_matrix(A)

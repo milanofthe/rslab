@@ -195,6 +195,7 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
     cnvtxs
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 fn contract(fine: &Graph, cmap: &[i32], cnvtxs: i32, parallel_min_edges: usize) -> Graph {
     let cn = cnvtxs as usize;
     let n = fine.nvtxs as usize;

@@ -23,6 +23,7 @@ use crate::numeric::supernodal::panel::{PanelFactor, PanelStorage};
 use crate::scalar::Scalar;
 use crate::sparse::general::GeneralCsc;
 
+// https://github.com/milanofthe/rslab/issues/288
 fn symmetrized_lower_pattern<T: Scalar>(
     a: &GeneralCsc<T>,
     row_map: Option<&[usize]>,
@@ -80,6 +81,7 @@ fn symmetrized_lower_pattern<T: Scalar>(
     (col_ptr, scattered)
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 fn diagonal_needs_matching<T: Scalar>(a: &GeneralCsc<T>, negligible: f64) -> bool {
     let scan = crate::parallel::Work::of(a.nnz() as f64, &DIAGONAL_RATE);
     crate::parallel::any(a.n, scan, |j| {
@@ -325,6 +327,7 @@ impl LuSymbolic {
         Ok(())
     }
 
+    // https://github.com/milanofthe/rslab/issues/288
     #[allow(clippy::type_complexity)]
     fn numeric<T: Scalar>(
         &self,
@@ -443,6 +446,7 @@ impl LuSymbolic {
             .sum()
     }
 
+    // https://github.com/milanofthe/rslab/issues/288
     pub fn estimate_memory<T: Scalar>(&self) -> crate::diagnostics::MemoryEstimate {
         self.est_cache.get::<T>(|| self.estimate_memory_for::<T>())
     }

@@ -10,6 +10,7 @@ permissions:
   contents: read
 
 jobs:
+  # https://github.com/milanofthe/rslab/issues/292
   version-check:
     name: version check (the wheel version is the one of python/Cargo.toml)
     runs-on: ubuntu-latest
@@ -48,6 +49,7 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist
           sccache: "true"
+          # https://github.com/milanofthe/rslab/issues/292
           manylinux: "2_28"
           working-directory: python
       - uses: actions/upload-artifact@v4

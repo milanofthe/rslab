@@ -53,6 +53,7 @@ pub(crate) fn pushed(len: usize) -> usize {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[inline]
 pub(crate) fn grow<T: crate::Scalar>(v: &mut Vec<T>, len: usize) {
     if v.len() < len {

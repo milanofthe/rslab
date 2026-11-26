@@ -50,6 +50,7 @@ pub fn refine_bisection(
 
         let mut locked: Vec<bool> = vec![false; n];
         let mut heap: BinaryHeap<(i32, Reverse<i32>, i32)> = BinaryHeap::new();
+        // https://github.com/milanofthe/rslab/issues/291
         for (v, &g) in gain.iter().enumerate().take(n) {
             heap.push((g, Reverse(v as i32), g));
         }
@@ -59,6 +60,7 @@ pub fn refine_bisection(
         let mut a_w = part_weight(graph, labels, PART_A);
         let mut b_w = total - a_w;
         let starts_balanced = a_w.max(b_w) <= max_side;
+        // https://github.com/milanofthe/rslab/issues/291
         let mut best_prefix: Option<usize> = if starts_balanced { Some(0) } else { None };
         let mut best_cut = pass_cut;
         let mut best_a_w = a_w;

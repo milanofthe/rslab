@@ -189,6 +189,7 @@ impl<T> Default for BlockOut<T> {
 }
 
 impl<T: Scalar> BlockOut<T> {
+    // https://github.com/milanofthe/rslab/issues/290
     fn reset(&mut self, bn: usize, annz: usize) {
         self.fin_abs.clear();
         self.fin_abs.resize(bn, KI_UNSET);
@@ -216,6 +217,7 @@ impl<T: Scalar> BlockOut<T> {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 pub(super) struct KluScratch<T> {
     mark: Vec<[Ki; 2]>,
     prune_end: Vec<Ki>,
@@ -299,6 +301,7 @@ pub(super) fn factor_block<T: Scalar>(
     let topo = &mut scratch.topo;
     let nonpiv = &mut scratch.nonpiv;
     // https://doi.org/10.1145/1824801.1824814
+    // https://github.com/milanofthe/rslab/issues/290
     let mut diag_row: Vec<Ki> = Vec::new();
     let mut diag_col: Vec<Ki> = Vec::new();
 
@@ -413,6 +416,7 @@ pub(super) fn factor_block<T: Scalar>(
                 debug_assert!(k < out.l_rowidx.len());
                 let lr = unsafe { *out.l_rowidx.get_unchecked(k) } as usize;
                 debug_assert!(lr < bn);
+                // https://github.com/milanofthe/rslab/issues/290
                 unsafe {
                     *x.get_unchecked_mut(lr) =
                         fmadd(nxu, *out.l_val.get_unchecked(k), *x.get_unchecked(lr));
@@ -462,6 +466,7 @@ pub(super) fn factor_block<T: Scalar>(
         x[piv] = T::zero();
         mark[piv][1] = lj as Ki;
         out.udiag.push(dval);
+        // https://github.com/milanofthe/rslab/issues/290
         for &np in nonpiv.iter() {
             let np = np as usize;
             if np == piv {
@@ -510,6 +515,7 @@ pub(super) fn factor_block<T: Scalar>(
     for ri in out.u_rowidx.iter_mut() {
         *ri += bs as Ki;
     }
+    // https://github.com/milanofthe/rslab/issues/290
     for e in out.prog_in.iter_mut() {
         e.1 = out.fin_abs[e.1 as usize];
     }
@@ -569,6 +575,7 @@ pub(super) fn factor_impl<T: Scalar>(
     let mut scatter_target = vec![0 as Ki; sym.nnz];
     let mut fin_of_pre = vec![0 as Ki; n];
 
+    // https://github.com/milanofthe/rslab/issues/290
     if !side {
         if nblocks > 1 {
             l_rowidx.reserve(sym.nnz * KLU_L_RESERVE);
@@ -627,6 +634,7 @@ pub(super) fn factor_impl<T: Scalar>(
             }
         }
     } else {
+        // https://github.com/milanofthe/rslab/issues/290
         let blocks: Vec<Result<BlockOut<T>, RslabError>> =
             crate::parallel::map_init::<crate::parallel::Rayon, _, _>(
                 nblocks,

@@ -300,6 +300,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                 }
             }
         }
+        // https://github.com/milanofthe/rslab/issues/288
         let plan = crate::numeric::supernodal::CmodPlan::new(
             sym,
             s,
@@ -335,6 +336,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
             let rate = UPDATE_RATE.of::<T>();
             let work = |w: &[f64]| crate::parallel::Work::of(w.iter().sum(), rate);
             let widest = (kt.k.schur_tile / nb).max(1);
+            // https://github.com/milanofthe/rslab/issues/288
             let units = |w: &[f64]| {
                 let share = crate::numeric::supernodal::unit_share(w.iter().sum(), kt.workers);
                 crate::numeric::supernodal::cut(w, share, widest, 0)
@@ -642,6 +644,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
         let kb = npiv;
         {
             let _panel = rsprobe::scope!(TRACE, "panel");
+            // https://github.com/milanofthe/rslab/issues/288
             while npiv < live && npiv - kb < nb_cdiv {
                 let k = npiv;
                 col.clear();
@@ -667,6 +670,7 @@ pub(super) fn lu_ll_factor_node<T: Scalar>(
                             }
                         }
                     }
+                    // https://github.com/milanofthe/rslab/issues/288
                     let want = thresh_sq > 0.0;
                     let deep = deep_update(before, cn_l, kb, &fs[..k - kb], offb, want, deep_par);
                     let cand = &fs[k - kb..];

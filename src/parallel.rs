@@ -179,6 +179,7 @@ fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B
                 _ => unreachable!("a pool runs every piece"),
             }
         }
+        // https://github.com/milanofthe/rslab/issues/292
         None => {
             let (a, b) = (carried(a), carried(b));
             ::rayon::join(|| as_piece(None, None, a), || as_piece(None, None, b))
@@ -186,6 +187,7 @@ fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/292
 pub(crate) fn enter<R: Send>(work: f64, f: impl FnOnce() -> R + Send) -> R {
     if rspool::rayon::width(work, usize::MAX) < 2 {
         return f();

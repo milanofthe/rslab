@@ -224,6 +224,7 @@ impl<T: Scalar> KluSolver<T> {
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/290
     fn solve_permuted_transpose(&self, w: &mut [T]) {
         let f = &self.factors;
         for b in 0..f.block_ptr.len() - 1 {

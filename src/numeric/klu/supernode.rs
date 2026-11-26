@@ -32,6 +32,7 @@ fn dense_pays(w: usize, s: usize) -> bool {
     dense < column
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 pub(super) fn layout<T: Scalar>(
     block_ptr: &[usize],
     l_colptr: &[usize],

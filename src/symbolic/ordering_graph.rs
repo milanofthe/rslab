@@ -53,6 +53,7 @@ impl<'a> OrderingGraph<'a> {
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/291
     /// Build the compressed graph now.
     pub fn prepare(&self) {
         self.compressed();

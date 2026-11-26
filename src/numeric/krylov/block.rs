@@ -732,6 +732,7 @@ where
         self.cols.iter().map(Column::basis_bytes).sum()
     }
 
+    // https://github.com/milanofthe/rslab/issues/287
     fn evict(&mut self, tol: f64) {
         let Some(mut free) = self.free() else {
             return;
@@ -1242,6 +1243,7 @@ where
                     m2[i * d + j] = (0..=j).map(|r| hb(r, i).conj() * sb(r, j)).sum();
                 }
             }
+            // https://github.com/milanofthe/rslab/issues/287
             for (theta, g) in harmonic_ritz_smallest(&m1, &m2, d, k.min(d / 2)) {
                 cands.push((theta.norm(), c, theta, g));
             }
@@ -1267,6 +1269,7 @@ where
                     .collect();
                 let vg = ritz(&self.cols[c].v, sg);
                 let mut zg = vec![T::zero(); vg.len()];
+                // https://github.com/milanofthe/rslab/issues/287
                 let width = self.s * n;
                 let applied = vg
                     .chunks(width)
@@ -1278,6 +1281,7 @@ where
                 zg
             };
             for v in cand.chunks_exact(n) {
+                // https://github.com/milanofthe/rslab/issues/287
                 orthonormal_into(&mut u, None, v, n, self.reorth_eta);
             }
         }
@@ -1286,6 +1290,7 @@ where
             return None;
         }
         let mut au = vec![T::zero(); kept * n];
+        // https://github.com/milanofthe/rslab/issues/287
         for (ui, ai) in u.chunks(self.s * n).zip(au.chunks_mut(self.s * n)) {
             self.op.apply_block(ui, ai, ui.len() / n);
         }

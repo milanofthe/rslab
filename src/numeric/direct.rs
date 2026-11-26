@@ -41,6 +41,7 @@ impl<T> SolveWork<T> {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 pub(crate) struct WorkPool<T>(std::sync::Mutex<Vec<SolveWork<T>>>);
 
 impl<T> Default for WorkPool<T> {
@@ -107,6 +108,7 @@ pub(crate) trait SolveCore<T: Scalar> {
     fn perturbations(&self) -> &[PivotFloor<T>];
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LogDet<T> {
     phase: T,

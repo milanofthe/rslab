@@ -5,6 +5,7 @@ use super::Li;
 use crate::numeric::supernodal::panel::Layout;
 use crate::scalar::Scalar;
 
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) struct CmodPlan {
     /// The updaters with work for this node, in updater order.
     pub spans: Vec<Span>,
@@ -18,6 +19,7 @@ pub(crate) struct CmodPlan {
     pub forks: bool,
 }
 
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) fn unit_share(total: f64, workers: usize) -> f64 {
     total / (workers.max(1) * crate::constants::UPDATE_UNITS_PER_WORKER) as f64
 }
@@ -108,6 +110,7 @@ impl Drop for CmodPlan {
 }
 
 thread_local! {
+    // https://github.com/milanofthe/rslab/issues/289
     static SPANS: std::cell::RefCell<Vec<Vec<Span>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -152,6 +155,7 @@ impl std::ops::Deref for Gloc<'_> {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/289
 impl Drop for Gloc<'_> {
     fn drop(&mut self) {
         for &g in self.rows {

@@ -284,6 +284,7 @@ pub(crate) fn schur_form(a: &[C], d: usize, budget: usize) -> Result<(Vec<C>, Ve
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/290
 pub(crate) fn triangular_eigenvector(t: &[C], d: usize, k: usize, left: bool) -> Option<Vec<C>> {
     let zero = C::new(0.0, 0.0);
     let lam = t[k * d + k];

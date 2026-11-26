@@ -24,6 +24,7 @@ pub(super) fn lower_tile_planes(
     worst
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn lower_tile_gemm<T: Scalar>(
     tmp: &mut [T],

@@ -35,6 +35,7 @@ fn prefix_flops(px: &Prefix) -> u64 {
     px.col_counts.iter().map(|&c| (c * c) as u64).sum()
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 fn prefix_work(px: &Prefix, workers: usize) -> u64 {
     let mut chain = vec![0u64; px.col_counts.len()];
     let mut longest = 0;
@@ -178,6 +179,7 @@ pub(super) fn race(
     } else {
         all
     };
+    // https://github.com/milanofthe/rslab/issues/291
     let (mut best, last_err, seeds) = crate::parallel::scope(scoped, |sc| {
         let start = |i: usize| {
             if !started[i].swap(true, Ordering::Relaxed) {

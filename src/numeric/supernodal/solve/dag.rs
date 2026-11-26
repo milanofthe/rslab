@@ -60,6 +60,7 @@ pub(crate) struct DagWork {
 }
 
 impl DagWork {
+    // https://github.com/milanofthe/rslab/issues/289
     #[inline]
     fn close(&self, i: usize) -> bool {
         self.open[i].fetch_sub(1, Ordering::AcqRel) == 1

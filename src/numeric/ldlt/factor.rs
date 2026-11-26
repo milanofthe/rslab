@@ -206,6 +206,7 @@ fn factor_left_looking<T: Scalar>(
     let factor_node =
         |s: usize| ll_factor_node(s, sym, inp, sched, pools, &emit, perturb_floor, kt);
     let emit_free = |k: usize| ldlt_emit_and_free(k, &emit, sym, sched, pools);
+    // https://github.com/milanofthe/rslab/issues/288
     crate::numeric::supernodal::ll_forest(sym, sched, &emit.refcount, &factor_node, &emit_free)?;
     let kept: Vec<bool> = sym.supernodes.iter().map(|sn| sn.ncol > 0).collect();
     let supernode_parent = crate::symbolic::supernode_parents(&sym.supernodes, &kept);

@@ -48,6 +48,7 @@ pub fn part_weight(graph: &Graph, labels: &[u8], p: u8) -> i64 {
     s
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 /// GGP trial. Grows part 0 from a random seed until its weight
 /// reaches `target_a`. All unvisited vertices go to part 1.
 pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> Vec<u8> {

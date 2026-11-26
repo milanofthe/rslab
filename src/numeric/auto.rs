@@ -519,6 +519,7 @@ impl<'s, T: Scalar> AutoSolver<'s, T> {
     /// factor; after an error no factor is held.
     pub fn refactor(&mut self, settings: &AutoSettings) -> Result<AutoBackend, RslabError> {
         if let Some(b) = self.active {
+            // https://github.com/milanofthe/rslab/issues/290
             if self.prev == self.csc.values {
                 return Ok(b);
             }

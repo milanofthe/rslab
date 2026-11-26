@@ -135,6 +135,7 @@ pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
     sep_count
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 fn try_augment(
     start: i32,
     adj: &[Vec<i32>],

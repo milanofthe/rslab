@@ -47,6 +47,7 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
             let col_start = matrix.col_ptr[j];
             let col_end = matrix.col_ptr[j + 1];
             let dj = d[j];
+            // https://github.com/milanofthe/rslab/issues/291
             let mut col_max = row_max[j];
 
             for k in col_start..col_end {

@@ -39,6 +39,7 @@ impl<'a> IpermWriter<'a> {
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/291
     #[inline]
     fn set(&self, orig: usize, pos: i32) {
         debug_assert_eq!(self.pos[orig].load(Ordering::Relaxed), -1);
@@ -73,6 +74,7 @@ impl AtomicStats {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 fn child_seed(seed: u64, which: u64) -> u64 {
     SplitMix::new(seed ^ which.wrapping_mul(crate::rng::GOLDEN_GAMMA)).next_u64()
 }
@@ -242,6 +244,7 @@ fn nd_subproblem(
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/291
 fn multilevel_node_bisection(
     graph: &Graph,
     opts: &MetisOptions,

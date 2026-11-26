@@ -13,6 +13,7 @@ pub(crate) fn ll_forest(
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     const NONE: usize = usize::MAX;
     let _s = rsprobe::scope!(DEBUG, "tree");
+    // https://github.com/milanofthe/rslab/issues/289
     let panel_entries = |s: usize| (sym.supernodes[s].nrow * sym.supernodes[s].ncol) as u64;
     let active = rsprobe::active!();
     let total: u64 = match active {
@@ -68,6 +69,7 @@ pub(crate) fn ll_forest(
             }
         }
     } else {
+        // https://github.com/milanofthe/rslab/issues/289
         fn run<'s>(
             scope: &crate::parallel::Scope<'_, 's>,
             s: usize,

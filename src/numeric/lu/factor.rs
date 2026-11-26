@@ -64,6 +64,7 @@ impl<T: Scalar> LlEmit<T> {
         let (l_slots, u_slots) = lu_slots(sym, st);
         let allowance = delay_allowance(&l_slots, &u_slots, delay_growth);
         let (l_arena, u_arena) = match storage {
+            // https://github.com/milanofthe/rslab/issues/288
             _ if delays => {
                 drop(storage);
                 let room = |v: &[Slot]| v.iter().map(|&(v, _)| v).sum::<usize>() + allowance;
@@ -359,6 +360,7 @@ pub(crate) fn factor_general_lu_numeric<T: Scalar>(
         Some(m) => ((0..n).map(|i| m.r[m.row_of[i]]).collect(), m.c.clone()),
         None => {
             let _s = rsprobe::scope!("scale");
+            // https://github.com/milanofthe/rslab/issues/288
             let (r, c, steps) = opts.threads.run(
                 0,
                 |cap| cap,

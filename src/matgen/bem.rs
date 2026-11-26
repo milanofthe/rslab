@@ -50,6 +50,7 @@ impl Default for BemOpts {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/292
 fn surface_points(n: usize, rough: f64, seed: u64) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
     let golden = std::f64::consts::PI * (1.0 + 5.0_f64.sqrt());
     let mut rng = Rng::new(seed);

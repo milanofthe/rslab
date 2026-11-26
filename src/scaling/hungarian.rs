@@ -50,6 +50,7 @@ pub(crate) struct Matching {
 
 const NONE: usize = usize::MAX;
 
+// https://github.com/milanofthe/rslab/issues/291
 const RINF: f64 = f64::MAX / 2.0;
 
 struct IndexHeap {
@@ -68,6 +69,7 @@ impl IndexHeap {
         }
     }
 
+    // https://github.com/milanofthe/rslab/issues/291
     fn reset(&mut self, rows: &[usize]) {
         rsprobe::add!(DEBUG, "heap slots", rows.len());
         for &i in rows {

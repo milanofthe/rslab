@@ -310,6 +310,7 @@ where
             best_omega = omega;
             best.copy_from_slice(x);
         }
+        // https://github.com/milanofthe/rslab/issues/292
         let finite = x.iter().all(|v| v.magnitude().is_finite());
         if (finite && omega <= policy.target) || it == policy.max_steps {
             break;

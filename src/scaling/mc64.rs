@@ -235,6 +235,7 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
             scaling[i] = 1.0;
             continue;
         }
+        // https://github.com/milanofthe/rslab/issues/291
         arg = arg.clamp(-LOG_HUGE, LOG_HUGE);
 
         let s = arg.exp();
@@ -312,6 +313,7 @@ fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph<'static>, Vec<f64>)
         let end = col_ptr[j + 1];
         pairs.clear();
         pairs.extend((start..end).map(|k| (row_idx[k], cost[k])));
+        // https://github.com/milanofthe/rslab/issues/291
         pairs.sort_by_key(|&(r, _)| r);
         for (k, &(r, c)) in (start..end).zip(&pairs) {
             row_idx[k] = r;

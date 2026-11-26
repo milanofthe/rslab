@@ -107,6 +107,7 @@ fn reset<V: Clone>(v: &mut Vec<V>, len: usize, x: V) {
     v.resize(len, x);
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[allow(clippy::too_many_arguments)]
 unsafe fn apply_bk_panel_trailing<T: Scalar>(
     base: *mut T,
@@ -261,6 +262,7 @@ unsafe fn flush_trailing<T: Scalar>(
         let rhs = mult_snap
             .as_ptr()
             .add((p0 - kb) * nb + (run.cols.start - kb));
+        // https://github.com/milanofthe/rslab/issues/288
         gemm::gemm(
             deep,
             run.cols.len(),
@@ -285,6 +287,7 @@ unsafe fn flush_trailing<T: Scalar>(
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/288
 #[allow(clippy::too_many_arguments)]
 unsafe fn ll_bk_panel_step<T: Scalar>(
     base: *mut T,
@@ -418,6 +421,7 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
                     if det.magnitude() < fl {
                         let step = floor.max(scale * GROWTH_EPS.sqrt());
                         let mut lift = step;
+                        // https://github.com/milanofthe/rslab/issues/288
                         while ((d11 + T::from_real(lift)) * (d22 + T::from_real(lift)) - d21 * d21)
                             .magnitude()
                             < fl
@@ -494,6 +498,7 @@ unsafe fn ll_bk_panel_step<T: Scalar>(
         if deep * pw * pw >= ll_cdiv_par {
             let pp = LdltPanelPtr(base);
             let nthreads = crate::parallel::threads();
+            // https://github.com/milanofthe/rslab/issues/288
             let cs = deep.div_ceil(nthreads).max(1);
             let chunks: Vec<(usize, usize)> = (parts.iter())
                 .flat_map(|&(p0, p1)| (p0..p1).step_by(cs).map(move |r| (r, (r + cs).min(p1))))
@@ -729,6 +734,7 @@ pub(super) fn ll_cdiv_emit<T: Scalar>(
                 // SAFETY: the trailing rows of the columns in `range`, the
                 // caller's own; `gbuf` and `l21buf` hold `mt * pw`.
                 unsafe {
+                    // https://github.com/milanofthe/rslab/issues/288
                     schur_tiles(
                         base.get(),
                         lay,

@@ -1925,6 +1925,7 @@ fn column_gap(x: &[C], y: &[C], n: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
+// https://github.com/milanofthe/rslab/issues/287
 #[test]
 fn block_gmres_single_basis_reaches_the_tolerance() {
     use crate::numeric::lu::LuSolver;
@@ -1993,6 +1994,7 @@ fn block_gmres_single_basis_reaches_the_tolerance() {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/287
 #[test]
 fn block_gmres_single_basis_cycle_stalls_at_its_rounding() {
     let u = unsym_grid(20);
@@ -2030,6 +2032,7 @@ fn block_gmres_single_basis_cycle_stalls_at_its_rounding() {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/287
 #[test]
 fn block_gmres_single_basis_continues_a_ladder() {
     let u = unsym_grid(20);

@@ -19,6 +19,7 @@ impl ReplayPlan {
             && self.min_ratio.is_none_or(|r| bn as f64 / nlev as f64 >= r)
     }
 
+    // https://github.com/milanofthe/rslab/issues/290
     fn start(&self, bp: &BlockPlan, bn: usize) -> Option<bool> {
         let nlev = bp.level_work.len().max(1);
         let pays = bp.work >= self.min_work.unwrap_or(KLU_PAR_MIN_FMADDS)
@@ -113,6 +114,7 @@ impl Decide {
         p.div_ceil(self.cut.ranges(work, p, k).max(1))
     }
 
+    // https://github.com/milanofthe/rslab/issues/290
     fn fastest(&self, bp: &BlockPlan, bn: usize, serial: f64, start: Option<bool>) -> Mode {
         let started = |m: Mode| {
             matches!(
@@ -559,6 +561,7 @@ impl<T: Scalar> KluSolver<T> {
                     f_v: PanelPtr(job.f_v.as_mut_ptr()),
                 };
                 let mode = at.map(|i| (&plan.blocks[i], modes_ref[i]));
+                // https://github.com/milanofthe/rslab/issues/290
                 if let Some((bp, Mode::Pipelined(k))) = mode {
                     let _s = rsprobe::scope!(DEBUG, "pipelined");
                     rsprobe::add!(DEBUG, "work", bp.work);

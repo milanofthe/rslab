@@ -55,6 +55,7 @@ pub use sparse::SparseReach;
 #[derive(Clone)]
 pub(crate) struct Subtree {
     nodes: Vec<u32>,
+    // https://github.com/milanofthe/rslab/issues/289
     ext: Vec<u32>,
 }
 
@@ -86,6 +87,7 @@ pub(crate) struct SolvePlan<T> {
     cfg: crate::SolveSettings,
 }
 
+// https://github.com/milanofthe/rslab/issues/289
 pub(crate) struct Scratch<T> {
     t: Vec<T>,
     g: Vec<T>,
@@ -793,6 +795,7 @@ impl<T: Scalar> SolvePlan<T> {
         chain
     }
 
+    // https://github.com/milanofthe/rslab/issues/289
     fn node_chunks(&self, par: bool, rows: usize, depth: usize, nr: usize) -> usize {
         let whole = usize::from(rows > 0);
         if !par {
@@ -814,6 +817,7 @@ impl<T: Scalar> SolvePlan<T> {
         (c0, w, r0, m, w + m, panel)
     }
 
+    // https://github.com/milanofthe/rslab/issues/289
     fn in_pool<R: Send>(par: bool, threads: Threads, f: impl FnOnce() -> R + Send) -> R {
         if !par {
             return threads.here(f);
@@ -1219,6 +1223,7 @@ fn add_assign<T: Scalar>(y: &mut [T], x: &[T]) {
     }
 }
 
+// https://github.com/milanofthe/rslab/issues/289
 fn tri_rows<T: Scalar>(
     v: &mut [T],
     panel: &[T],
