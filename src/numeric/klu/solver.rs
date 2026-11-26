@@ -16,16 +16,10 @@ impl<T: Scalar> crate::numeric::direct::SolveCore<T> for KluSolver<T> {
         &self.works
     }
 
-    /// None: a vanishing pivot is a [`RslabError::SingularBasis`] at factor
-    /// time instead.
     fn perturbations(&self) -> &[crate::PivotFloor<T>] {
         &[]
     }
 
-    /// `P_r R A P_c^T` is block upper triangular with `L_b U_b` on its
-    /// diagonal blocks (`R` the row scaling): `det A` is the product of the
-    /// `U_b` diagonals, the signs of both permutations and the reciprocal
-    /// row scaling.
     fn log_det_raw(&self) -> Result<crate::numeric::direct::LogDet<T>, RslabError> {
         let f = &self.factors;
         let mut d = crate::numeric::direct::LogDet::one();
@@ -208,7 +202,7 @@ impl<T: Scalar> KluSolver<T> {
                 .iter()
                 .map(|&orig| b[orig] * T::from_real(f.rs_inv[orig])),
         );
-        // all-zero, only ever grown: the supernode kernel leaves it as found
+        debug_assert!(work.gather.iter().all(|v| *v == T::zero()));
         if work.gather.len() < f.l_widest {
             work.gather.resize(f.l_widest, T::zero());
         }
@@ -218,50 +212,20 @@ impl<T: Scalar> KluSolver<T> {
         }
     }
 
-    /// Solve the transposed system `A^T x = b` with the **same** factorization.
-    ///
-    /// This is the plain transpose, NOT the conjugate transpose: for a complex
-    /// adjoint solve `A^H x = b`, conjugate `b` before and `x` after. (This
-    /// matches the convention of the usual sparse-LU transpose solves, and is
-    /// what implicit-function adjoints over holomorphic residuals need.)
-    ///
-    /// The stored form is `A = Rs * P_r^T * M * C` with `M` the block-upper
-    /// (BTF) permuted, row-scaled matrix and `M_bb = L_b U_b` per diagonal
-    /// block, so `A^T x = b` is `M^T (P_r Rs x) = C b`: gather `b` through the
-    /// column permutation, run the transposed block substitution (blocks
-    /// forward, per block `U^T` forward then `L^T` backward, off-block `F^T`
-    /// contributions from the already-solved earlier blocks), then scatter
-    /// through the row permutation and undo the row scaling. Sequential and
-    /// bit-deterministic, like [`solve`](Self::solve).
     fn solve_transpose_one(&self, b: &[T], x: &mut [T], w: &mut Vec<T>) {
         let f = &self.factors;
-        // w = C*b: position k of the permuted system reads b at its column.
         w.clear();
         w.extend(f.col_perm.iter().map(|&c| b[c]));
         self.solve_permuted_transpose(w);
-        // x = Rs^-1 * P_r^T * w: scatter through the row permutation, then undo
-        // the row scaling (Rs is diagonal, so it transposes onto the solution).
         for (k, &orig) in f.row_perm.iter().enumerate() {
             x[orig] = w[k] * T::from_real(f.rs_inv[orig]);
         }
     }
 
-    /// The transposed block substitution on the permuted vector: `M^T` is block
-    /// **lower** triangular (the transpose of the BTF block-upper `M`), so the
-    /// blocks run forward, and within a block `M_bb^T = U_b^T L_b^T` solves as
-    /// `U^T` (lower, diagonal `udiag`) forward then `L^T` (unit upper) backward.
-    /// Column `j` of the stored `U`/`L`/`F` is row `j` of the transpose, so
-    /// every inner loop is a gather over the existing column storage.
     fn solve_permuted_transpose(&self, w: &mut [T]) {
-        // Deliberately mul+sub, NOT `fmadd`: every inner loop here is a
-        // gather onto a single accumulator - a latency-bound serial chain
-        // where the FMA's higher latency loses to the pipelined mul + sub
-        // (see the `solve_ldlt` backward-sweep note). `fmadd` stays in the
-        // scatter-form sweeps of `solve_permuted`/`solve_many`.
         let f = &self.factors;
         for b in 0..f.block_ptr.len() - 1 {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            // F^T: this block's rows read the already-solved earlier blocks.
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
@@ -269,7 +233,6 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 w[j] = acc;
             }
-            // U^T (lower triangular, diagonal `udiag`) forward within the block.
             for j in bs..be {
                 let mut acc = w[j];
                 for k in f.u_colptr[j]..f.u_colptr[j + 1] {
@@ -277,7 +240,6 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 w[j] = acc / f.udiag[j];
             }
-            // L^T (unit upper) backward within the block.
             for j in (bs..be).rev() {
                 let mut acc = w[j];
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -291,7 +253,6 @@ impl<T: Scalar> KluSolver<T> {
     fn solve_block(&self, b: &[T], nrhs: usize, x: &mut [T], work: &mut crate::SolveWork<T>) {
         let f = &self.factors;
         let n = f.n;
-        // Permute + scale all columns into the row-major work block.
         work.y.clear();
         work.y.resize(n * nrhs, T::zero());
         let w = work.y.as_mut_slice();
@@ -301,13 +262,11 @@ impl<T: Scalar> KluSolver<T> {
                 w[k * nrhs + c] = b[c * n + orig] * sv;
             }
         }
-        // Row j's values, staged so the axpy targets never alias the source.
         work.row.clear();
         work.row.resize(nrhs, T::zero());
         let xj = work.row.as_mut_slice();
         for blk in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[blk], f.block_ptr[blk + 1]);
-            // L (unit lower) forward within the block, column by column.
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.l_colptr[j]..f.l_colptr[j + 1] {
@@ -318,7 +277,6 @@ impl<T: Scalar> KluSolver<T> {
                     }
                 }
             }
-            // U backward within the block.
             for j in (bs..be).rev() {
                 let d = f.udiag[j];
                 {
@@ -336,7 +294,6 @@ impl<T: Scalar> KluSolver<T> {
                     }
                 }
             }
-            // Off-block columns feed the rows of earlier blocks.
             for j in bs..be {
                 xj.copy_from_slice(&w[j * nrhs..j * nrhs + nrhs]);
                 for k in f.f_colptr[j]..f.f_colptr[j + 1] {
@@ -348,7 +305,6 @@ impl<T: Scalar> KluSolver<T> {
                 }
             }
         }
-        // Undo the column permutation.
         for (k, &col) in f.col_perm.iter().enumerate() {
             for c in 0..nrhs {
                 x[c * n + col] = w[k * nrhs + c];
@@ -356,18 +312,10 @@ impl<T: Scalar> KluSolver<T> {
         }
     }
 
-    /// The block forward/backward substitution on the permuted/scaled vector
-    /// `w`, `tmp` the supernode kernel's gather (all-zero, left so). The
-    /// axpys run through `fmadd` with the loop-invariant operand negated once
-    /// per column; the supernodes of `L` are applied by the dense kernel,
-    /// whose sums `solve_many` (column by column) forms in another order.
     fn solve_permuted(&self, w: &mut [T], tmp: &mut [T]) {
         let f = &self.factors;
         for b in (0..f.block_ptr.len() - 1).rev() {
             let (bs, be) = (f.block_ptr[b], f.block_ptr[b + 1]);
-            // L (unit lower) forward within the block, a supernode worth the
-            // dense kernel as one ([`super::supernode`]). Unchecked: all row
-            // indices are final positions `< n` by construction.
             let mut j = bs;
             while j < be {
                 let q = f.sn_last[j] as usize;
@@ -401,7 +349,6 @@ impl<T: Scalar> KluSolver<T> {
                 }
                 j += 1;
             }
-            // U backward within the block.
             for j in (bs..be).rev() {
                 let xj = w[j] / f.udiag[j];
                 w[j] = xj;
@@ -416,7 +363,6 @@ impl<T: Scalar> KluSolver<T> {
                     }
                 }
             }
-            // Off-block columns feed the rows of earlier blocks.
             for j in bs..be {
                 let xj = w[j];
                 if xj != T::zero() {
