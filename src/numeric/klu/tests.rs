@@ -50,20 +50,11 @@ fn klu_matching_keeps_fill_at_the_symbolic_estimate() {
         "no pivot-induced fill"
     );
     let x = s.solve(&b).unwrap();
-    let mut r = b.clone();
-    let mut d: Vec<f64> = b.iter().map(|v| v.abs()).collect();
-    for j in 0..n {
-        for k in a.col_ptr[j]..a.col_ptr[j + 1] {
-            r[a.row_idx[k]] -= a.values[k] * x[j];
-            d[a.row_idx[k]] += a.values[k].abs() * x[j].abs();
-        }
-    }
-    let omega = r
-        .iter()
-        .zip(&d)
-        .map(|(ri, di)| ri.abs() / di)
-        .fold(0.0, f64::max);
-    assert!(omega < 1e-13, "backward error {omega}");
+    let omega = componentwise(&a, &x, &b);
+    assert!(
+        omega <= solve_backward_error(n, U64),
+        "backward error {omega}"
+    );
     let without = KluSettings::default().with_matching(false);
     let s0 = KluSolver::factor(&a, &without).unwrap();
     assert!(
@@ -74,18 +65,48 @@ fn klu_matching_keeps_fill_at_the_symbolic_estimate() {
 use super::*;
 use crate::numeric::lu::LuSolver;
 use crate::numeric::settings::SolverSettings;
+use crate::refine::RefineOperator;
+use crate::test_constants::{
+    factor_product, fixed_refinement, forward_error, recomputed_residual, solve_backward_error,
+    varah_condition, U64, UC64,
+};
 use num_complex::Complex;
 
 fn resid<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
     let mut ax = vec![T::zero(); a.n];
     a.matvec(x, &mut ax);
-    let num = b
-        .iter()
-        .zip(&ax)
-        .map(|(&bi, &axi)| (bi - axi).magnitude())
-        .fold(0.0, f64::max);
-    let den = b.iter().map(|v| v.magnitude()).fold(0.0, f64::max);
-    num / den.max(1e-300)
+    let inf = |v: &mut dyn Iterator<Item = f64>| v.fold(0.0, f64::max);
+    let num = inf(&mut b.iter().zip(&ax).map(|(&bi, &axi)| (bi - axi).magnitude()));
+    let ones = vec![T::one(); a.n];
+    let mut rows = vec![0.0; a.n];
+    a.apply_abs(&ones, &mut rows);
+    let x_norm = inf(&mut x.iter().map(|v| v.magnitude()));
+    let b_norm = inf(&mut b.iter().map(|v| v.magnitude()));
+    num / (inf(&mut rows.into_iter()) * x_norm + b_norm)
+}
+
+fn componentwise(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
+    let mut ax = vec![0.0; a.n];
+    a.matvec(x, &mut ax);
+    let mut abs_ax = vec![0.0; a.n];
+    a.apply_abs(x, &mut abs_ax);
+    (0..a.n)
+        .map(|i| (b[i] - ax[i]).abs() / (abs_ax[i] + b[i].abs()))
+        .fold(0.0, f64::max)
+}
+
+fn entries(a: &GeneralCsc<f64>) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+    (0..a.n).flat_map(move |j| {
+        (a.col_ptr[j]..a.col_ptr[j + 1]).map(move |k| (a.row_idx[k], j, a.values[k].abs()))
+    })
+}
+
+fn solution_gap(a: &GeneralCsc<f64>, x: &[f64]) -> f64 {
+    let fe = forward_error(
+        varah_condition(a.n, entries(a)),
+        solve_backward_error(a.n, U64),
+    );
+    2.0 * fe * x.iter().map(|v| v.abs()).fold(0.0, f64::max) / (1.0 - fe)
 }
 
 /// Deterministic xorshift for value generation (no rand dependency).
@@ -190,7 +211,11 @@ fn klu_offdiagonal_pivot_reassigns_diagonal() {
     );
     let b: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
     let x = f.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-9, "residual {}", resid(&a, &x, &b));
+    assert!(
+        resid(&a, &x, &b) <= solve_backward_error(n, U64),
+        "residual {}",
+        resid(&a, &x, &b)
+    );
 }
 
 #[test]
@@ -200,8 +225,11 @@ fn klu_solves_circuit_like_and_matches_lu() {
     let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     assert!(s.n_blocks() >= 2, "bridge structure must be reducible");
     let x = s.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-12, "residual {}", resid(&a, &x, &b));
-    // cross-check against the supernodal LU
+    assert!(
+        resid(&a, &x, &b) <= solve_backward_error(a.n, U64),
+        "residual {}",
+        resid(&a, &x, &b)
+    );
     let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
     let xr = f.solve(&b).unwrap();
     let diff = x
@@ -209,7 +237,7 @@ fn klu_solves_circuit_like_and_matches_lu() {
         .zip(&xr)
         .map(|(&p, &q)| (p - q).abs())
         .fold(0.0, f64::max);
-    assert!(diff < 1e-9, "klu vs lu differ by {diff}");
+    assert!(diff <= solution_gap(&a, &x), "klu vs lu differ by {diff}");
 }
 
 #[test]
@@ -252,7 +280,11 @@ fn klu_complex_small_diagonal_pivots() {
     let b: Vec<Complex<f64>> = (0..n).map(|i| c((i % 5) as f64 - 2.0, 1.0)).collect();
     let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     let x = s.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-12, "residual {}", resid(&a, &x, &b));
+    assert!(
+        resid(&a, &x, &b) <= solve_backward_error(n, UC64),
+        "residual {}",
+        resid(&a, &x, &b)
+    );
 }
 
 #[test]
@@ -278,7 +310,7 @@ fn klu_lower_triangular_needs_no_fill() {
     assert_eq!(s.factor_nnz(), 2 * n - 1);
     let b: Vec<f64> = (0..n).map(|i| i as f64 - 7.0).collect();
     let x = s.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-14);
+    assert!(resid(&a, &x, &b) <= solve_backward_error(n, U64));
 }
 
 #[test]
@@ -329,7 +361,7 @@ fn klu_refactor_replays_and_matches_fresh_factor() {
     let b0: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
     let x0 = s.solve(&b0).unwrap();
     assert!(
-        resid(&a, &x0, &b0) < 1e-11,
+        resid(&a, &x0, &b0) <= solve_backward_error(a.n, U64),
         "replay residual {}",
         resid(&a, &x0, &b0)
     );
@@ -366,7 +398,7 @@ fn klu_refactor_replays_and_matches_fresh_factor() {
     let b: Vec<f64> = (0..a.n).map(|i| (i % 9) as f64 - 4.0).collect();
     let x = s.solve(&b).unwrap();
     assert!(
-        resid(&a2, &x, &b) < 1e-11,
+        resid(&a2, &x, &b) <= solve_backward_error(a.n, U64),
         "refactor residual {}",
         resid(&a2, &x, &b)
     );
@@ -534,7 +566,7 @@ fn klu_parallel_replays_are_bit_identical_to_sequential() {
 
     let x = s_par.solve(&b).unwrap();
     assert!(
-        resid(&a2, &x, &b) < 1e-10,
+        resid(&a2, &x, &b) <= solve_backward_error(a2.n, U64),
         "parallel refactor solve residual"
     );
 }
@@ -567,7 +599,7 @@ fn klu_refactor_rejects_changed_pattern() {
     assert!(s.refactor(&a2).is_err(), "changed pattern must be rejected");
 }
 
-/// Max-norm relative residual of the *transposed* system `A^T x = b`.
+/// Normwise backward error of the *transposed* system `A^T x = b`.
 fn resid_t<T: Scalar>(a: &GeneralCsc<T>, x: &[T], b: &[T]) -> f64 {
     resid(&a.transpose(), x, b)
 }
@@ -582,7 +614,7 @@ fn klu_solve_transpose_matches_factored_transpose() {
     assert!(s.n_blocks() >= 2, "bridge structure must be reducible");
     let x = s.solve_transpose(&b).unwrap();
     assert!(
-        resid_t(&a, &x, &b) < 1e-12,
+        resid_t(&a, &x, &b) <= solve_backward_error(a.n, U64),
         "residual {}",
         resid_t(&a, &x, &b)
     );
@@ -594,7 +626,7 @@ fn klu_solve_transpose_matches_factored_transpose() {
         .map(|(&p, &q)| (p - q).abs())
         .fold(0.0, f64::max);
     assert!(
-        diff < 1e-9,
+        diff <= solution_gap(&a.transpose(), &x),
         "transpose solve vs factored transpose differ by {diff}"
     );
 }
@@ -642,7 +674,7 @@ fn klu_solve_transpose_complex_plain_not_conjugate() {
     let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     let x = s.solve_transpose(&b).unwrap();
     assert!(
-        resid_t(&a, &x, &b) < 1e-12,
+        resid_t(&a, &x, &b) <= solve_backward_error(n, UC64),
         "residual {}",
         resid_t(&a, &x, &b)
     );
@@ -663,7 +695,7 @@ fn klu_solve_transpose_complex_plain_not_conjugate() {
             values: t.values.iter().map(|v| v.conj()).collect(),
         }
     };
-    assert!(resid(&ah, &xh, &b) < 1e-12);
+    assert!(resid(&ah, &xh, &b) <= solve_backward_error(n, UC64));
 }
 
 #[test]
@@ -687,7 +719,7 @@ fn klu_solve_transpose_singleton_blocks_and_options() {
     assert_eq!(s.n_blocks(), n);
     let b: Vec<f64> = (0..n).map(|i| i as f64 - 7.0).collect();
     let x = s.solve_transpose(&b).unwrap();
-    assert!(resid_t(&tri, &x, &b) < 1e-14);
+    assert!(resid_t(&tri, &x, &b) <= solve_backward_error(n, U64));
 
     let a = circuit_like(100, 21);
     let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64 - 2.0).collect();
@@ -700,7 +732,10 @@ fn klu_solve_transpose_singleton_blocks_and_options() {
     ] {
         let s = KluSolver::factor(&a, &settings).unwrap();
         let x = s.solve_transpose(&b).unwrap();
-        assert!(resid_t(&a, &x, &b) < 1e-12, "settings {settings:?}");
+        assert!(
+            resid_t(&a, &x, &b) <= solve_backward_error(a.n, U64),
+            "settings {settings:?}"
+        );
     }
 }
 
@@ -729,7 +764,7 @@ fn klu_solve_transpose_after_refactor() {
     let b: Vec<f64> = (0..a.n).map(|i| (i % 9) as f64 - 4.0).collect();
     let x = s.solve_transpose(&b).unwrap();
     assert!(
-        resid_t(&a2, &x, &b) < 1e-11,
+        resid_t(&a2, &x, &b) <= solve_backward_error(a2.n, U64),
         "residual {}",
         resid_t(&a2, &x, &b)
     );
@@ -766,11 +801,15 @@ fn klu_solve_refined_tightens_residual() {
     let a = circuit_like(120, 11);
     let s = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     let b: Vec<f64> = (0..a.n).map(|i| ((i * i) % 23) as f64 - 11.0).collect();
-    let x = s
+    let (x, refined) = s
         .solve_refined(&a, &b, &crate::RefinePolicy::steps(2))
+        .unwrap();
+    let plain = s
+        .solve_refined(&a, &b, &crate::RefinePolicy::steps(0))
         .unwrap()
-        .0;
-    assert!(resid(&a, &x, &b) < 1e-13);
+        .1;
+    assert!(refined.omega <= plain.omega);
+    assert!(componentwise(&a, &x, &b) <= fixed_refinement(a.n, U64));
 }
 
 #[test]
@@ -787,7 +826,7 @@ fn klu_without_btf_still_solves() {
     assert_eq!(s.n_blocks(), 1);
     let b: Vec<f64> = (0..a.n).map(|i| (i % 5) as f64).collect();
     let x = s.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-12);
+    assert!(resid(&a, &x, &b) <= solve_backward_error(a.n, U64));
 }
 
 #[test]
@@ -1008,20 +1047,22 @@ fn klu_composes_as_gmres_preconditioner() {
     let m = KluSolver::factor(&a, &KluSettings::default()).unwrap();
     let b: Vec<f64> = (0..a.n).map(|i| (i % 7) as f64 - 3.0).collect();
     // Exact preconditioner -> GMRES converges in one iteration.
-    let res = gmres(
-        &a,
-        &b,
-        &m,
-        &crate::KrylovSettings::default()
-            .with_tol(1e-12)
-            .with_max_iter(5)
-            .with_restart(5),
-        None,
-    )
-    .unwrap();
+    let settings = crate::KrylovSettings::default()
+        .with_tol(1e-12)
+        .with_max_iter(5)
+        .with_restart(5);
+    let res = gmres(&a, &b, &m, &settings, None).unwrap();
     assert!(res.converged);
     assert!(res.iters <= 2, "iterations {}", res.iters);
-    assert!(resid(&a, &res.x, &b) < 1e-10);
+    let mut ax = vec![0.0; a.n];
+    a.matvec(&res.x, &mut ax);
+    let mut abs_ax = vec![0.0; a.n];
+    a.apply_abs(&res.x, &mut abs_ax);
+    let two = |v: &mut dyn Iterator<Item = f64>| v.map(|t| t * t).sum::<f64>().sqrt();
+    let r = two(&mut (0..a.n).map(|i| b[i] - ax[i]));
+    let abs_norm = two(&mut (0..a.n).map(|i| b[i].abs() + abs_ax[i]));
+    let b_norm = two(&mut b.iter().copied());
+    assert!(r <= recomputed_residual(settings.tol, b_norm, abs_norm, a.n, a.n, U64));
 }
 
 #[test]
@@ -1037,7 +1078,7 @@ fn klu_settings_compose() {
     let solver = KluSolver::factor(&a, &s).unwrap();
     let b: Vec<f64> = (0..a.n).map(|i| (i % 3) as f64).collect();
     let x = solver.solve(&b).unwrap();
-    assert!(resid(&a, &x, &b) < 1e-12);
+    assert!(resid(&a, &x, &b) <= solve_backward_error(a.n, U64));
 }
 
 /// The exported factors reproduce the factored matrix, `P_r R A P_c =
@@ -1081,9 +1122,19 @@ fn exported_factors_reproduce_the_matrix() {
         }
         let mut ax = vec![0.0; n];
         a.matvec(&xc, &mut ax);
+        let (mut ux_abs, mut lux_abs, mut fx_abs) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        u.apply_abs(&x, &mut ux_abs);
+        l.apply_abs(&ux_abs, &mut lux_abs);
+        f.apply_abs(&x, &mut fx_abs);
+        let mut ax_abs = vec![0.0; n];
+        a.apply_abs(&xc, &mut ax_abs);
         let rs = solver.row_scale();
         for (k, &r) in solver.row_perm().iter().enumerate() {
-            assert!((lux[k] + fx[k] - rs[r] * ax[r]).abs() < 1e-12, "row {k}");
+            let scale = lux_abs[k] + fx_abs[k] + rs[r] * ax_abs[r];
+            assert!(
+                (lux[k] + fx[k] - rs[r] * ax[r]).abs() <= factor_product(n, U64) * scale,
+                "row {k}"
+            );
         }
     }
 }
@@ -1122,8 +1173,19 @@ fn exported_complex_factors_reproduce_the_matrix() {
     }
     let mut ax = vec![zero; n];
     a.matvec(&xc, &mut ax);
+    let (mut ux_abs, mut lux_abs, mut fx_abs) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    u.apply_abs(&x, &mut ux_abs);
+    let ux_mag: Vec<C> = ux_abs.iter().map(|&v| C::new(v, 0.0)).collect();
+    l.apply_abs(&ux_mag, &mut lux_abs);
+    f.apply_abs(&x, &mut fx_abs);
+    let mut ax_abs = vec![0.0; n];
+    a.apply_abs(&xc, &mut ax_abs);
     let rs = solver.row_scale();
     for (k, &r) in solver.row_perm().iter().enumerate() {
-        assert!((lux[k] + fx[k] - ax[r] * rs[r]).norm() < 1e-12, "row {k}");
+        let scale = lux_abs[k] + fx_abs[k] + rs[r] * ax_abs[r];
+        assert!(
+            (lux[k] + fx[k] - ax[r] * rs[r]).norm() <= factor_product(n, UC64) * scale,
+            "row {k}"
+        );
     }
 }

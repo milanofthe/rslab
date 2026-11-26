@@ -404,6 +404,7 @@ fn replace<T: Scalar>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_constants::{gamma, gram_schmidt, ritz_value, UC32, UC64};
     use crate::FnOperator;
     use num_complex::Complex;
 
@@ -503,9 +504,14 @@ mod tests {
             // R = V_1 S
             let (v, s) = (ar.basis(), ar.start());
             for c in 0..p {
+                let r_norm = dot(&r[c * n..(c + 1) * n], &r[c * n..(c + 1) * n])
+                    .re
+                    .sqrt();
                 for i in 0..n {
                     let vs: C = (0..p).map(|k| v[k * n + i] * s[k * p + c]).sum();
-                    assert!((vs - r[c * n + i]).norm() < 1e-12);
+                    let magnitude: f64 = (0..p).map(|k| (v[k * n + i] * s[k * p + c]).norm()).sum();
+                    let bound = gram_schmidt(p, n, UC64) * r_norm + gamma(p, UC64) * magnitude;
+                    assert!((vs - r[c * n + i]).norm() <= bound);
                 }
             }
             assert_eq!(
@@ -547,8 +553,12 @@ mod tests {
         let s = crate::dense::Schur::new(&ar.hessenberg(), m).unwrap();
         let mut got = s.eigenvalues();
         got.sort_by(|x, y| x.re.total_cmp(&y.re));
+        let a_norm = vals.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         for (g, w) in got.iter().zip(vals) {
-            assert!((g - C::new(w, 0.0)).norm() < 1e-10, "{g} against {w}");
+            assert!(
+                (g - C::new(w, 0.0)).norm() <= ritz_value(m, n, UC64) * a_norm,
+                "{g} against {w}"
+            );
         }
         assert_eq!(ar.step(&op).unwrap(), 0, "a step on an invariant space");
     }
@@ -642,7 +652,8 @@ mod tests {
             assert_eq!(ar.step(&op).unwrap(), 1);
         }
         let v = ar.basis();
-        for i in 0..9 {
+        let k = v.len() / n;
+        for i in 0..k {
             for j in 0..=i {
                 let g: Complex<f32> = v[i * n..(i + 1) * n]
                     .iter()
@@ -650,7 +661,11 @@ mod tests {
                     .map(|(x, y)| x.conj() * y)
                     .sum();
                 let want = if i == j { 1.0 } else { 0.0 };
-                assert!((g - want).norm() < 1e-5, "V^H V at {i},{j}: {g}");
+                let bound = gram_schmidt(k, n, UC32) + gamma(n, UC32);
+                assert!(
+                    f64::from((g - want).norm()) <= bound,
+                    "V^H V at {i},{j}: {g}"
+                );
             }
         }
     }

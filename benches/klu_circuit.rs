@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use rslab::{GeneralCsc, KluSettings, KluSymbolic, LuSolver, SolverSettings};
+use rslab::{GeneralCsc, KluSettings, KluSymbolic, LuSolver, RefineOperator, SolverSettings};
 
 /// Deterministic xorshift.
 struct Rng(u64);
@@ -94,15 +94,20 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
 mod ss_klu_ref;
 use ss_klu_ref::SsKlu;
 
+#[path = "../tests/common/constants.rs"]
+pub mod constants;
+use constants::{solve_backward_error, U64};
+
 fn resid(a: &GeneralCsc<f64>, x: &[f64], b: &[f64]) -> f64 {
     let mut ax = vec![0.0; a.n];
     a.matvec(x, &mut ax);
-    let num = b
-        .iter()
-        .zip(&ax)
-        .map(|(bi, axi)| (bi - axi).abs())
-        .fold(0.0, f64::max);
-    num / b.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300)
+    let inf = |v: &mut dyn Iterator<Item = f64>| v.fold(0.0, f64::max);
+    let num = inf(&mut b.iter().zip(&ax).map(|(bi, axi)| (bi - axi).abs()));
+    let mut rows = vec![0.0; a.n];
+    a.apply_abs(&vec![1.0; a.n], &mut rows);
+    let x_norm = inf(&mut x.iter().map(|v| v.abs()));
+    let b_norm = inf(&mut b.iter().map(|v| v.abs()));
+    num / (inf(&mut rows.into_iter()) * x_norm + b_norm)
 }
 
 /// Settings sweep (`RLA_KLU_SWEEP=1`): grid over the three KLU knobs on the
@@ -254,10 +259,13 @@ fn main() {
         let mf_res = resid(&a, &xm, &b);
         let mf_nnz = f.factor_nnz();
         assert!(
-            klu_res < 1e-8,
+            klu_res <= solve_backward_error(a.n, U64),
             "klu residual {klu_res} (mf residual {mf_res})"
         );
-        assert!(mf_res < 1e-8, "supernodal residual {mf_res}");
+        assert!(
+            mf_res <= solve_backward_error(a.n, U64),
+            "supernodal residual {mf_res}"
+        );
 
         // --- sweep proxy: 20 value sets, same pattern ---
         let t = Instant::now();
@@ -349,7 +357,10 @@ fn main() {
         if let Some(ss) = SsKlu::try_new() {
             if let Some((r, xs)) = ss.run(&a, &b, SWEEP) {
                 let ss_res = resid(&a, &xs, &b);
-                assert!(ss_res < 1e-8, "suitesparse klu residual {ss_res}");
+                assert!(
+                    ss_res <= solve_backward_error(a.n, U64),
+                    "suitesparse klu residual {ss_res}"
+                );
                 println!(
                     "{:>8} suitesparse-klu: ana {:>8.2?} fac {:>8.2?} refac {:>8.2?} solve {:>8.2?} lnz+unz {:>9} blocks {:>5} sweep {:>8.2?} res {:.1e}",
                     "",
