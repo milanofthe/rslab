@@ -36,33 +36,13 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     let max_iter = crate::constants::INFNORM_MAX_ITER;
     let tol = crate::constants::INFNORM_TOL;
 
-    // Work buffer for the row inf-norms.
     let mut row_max = vec![0.0f64; n];
 
     for _ in 0..max_iter {
-        // Reset the row-max buffer.
         for r in row_max.iter_mut() {
             *r = 0.0;
         }
 
-        // Accumulate row maxes by scanning the lower triangle once.
-        // Each (i, j) entry with i >= j contributes to row i (via the
-        // explicit storage) and to row j (by symmetry).
-        //
-        // The row-j accumulation is hoisted to a register-resident
-        // `col_max` across the inner k-loop, then folded into
-        // `row_max[j]` once at column end. The diagonal entry (i == j)
-        // is folded into `col_max` only - its `row_max[i]` write would
-        // be overwritten by the end-of-column store, so we skip the
-        // memory traffic and rely on `col_max` to carry the diagonal's
-        // contribution. Off-diagonal entries (i > j) update both
-        // `row_max[i]` and `col_max`.
-        //
-        // Bit-identical to updating `row_max` in place: max(*,*) is
-        // associative on non-NaN inputs (every `v` is `|*|` of finite
-        // products), so combining via a register accumulator then
-        // folding into `row_max[j]` produces the same value as in-place
-        // updates in any iteration order.
         for j in 0..n {
             let col_start = matrix.col_ptr[j];
             let col_end = matrix.col_ptr[j + 1];
@@ -82,7 +62,6 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
             row_max[j] = col_max;
         }
 
-        // Update diagonal and check convergence.
         let mut max_dev = 0.0f64;
         for i in 0..n {
             let m = row_max[i];
@@ -93,10 +72,6 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
                     max_dev = dev;
                 }
             }
-            // Rows with all-zero entries keep d[i] at the current value
-            // (initially 1.0) - they are structurally zero and the
-            // downstream numeric phase will reject them as singular
-            // pivots.
         }
 
         if max_dev < tol {
@@ -110,7 +85,7 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
 /// One-pass symmetric inf-norm equilibration `s_i = 1/sqrt(max_j |A_ij|)` (a single
 /// Knight-Ruiz step) and the [`crate::LdltSolver`] default. Cheaper than the
 /// iterative [`compute_infnorm`]: it tolerates a zero diagonal (the
-/// row max is taken over off-diagonals) and never iterates. An all-zero row is
+/// row max includes the off-diagonals) and never iterates. An all-zero row is
 /// left unscaled (`s_i = 1`), surfacing as a singular pivot during factorization.
 /// The scan folds in the symmetric partner `(j, i)` of every stored `(i, j)`, so
 /// it is correct for a lower-triangular *or* a full symmetric store (`max` is
@@ -144,29 +119,18 @@ mod tests {
     use crate::sparse::csc::CscMatrix;
     use crate::test_constants::knight_ruiz_deviation;
 
-    /// The guarded Knight-Ruiz step applies `d/sqrt(m)`
-    /// only when it stays finite and positive, else holds `d`. Healthy inputs
-    /// are unchanged; overflow (`d/sqrt(m) -> Inf`), underflow-to-zero
-    /// (`m = Inf`), and `NaN` inputs all return the input `d`.
     #[test]
     fn kr_guarded_update_guards_extremes() {
         assert_eq!(crate::scaling::kr_guarded_update(1.0, 4.0), 0.5);
         assert_eq!(crate::scaling::kr_guarded_update(6.0, 9.0), 2.0);
-        // Overflow: 1e300/sqrt(1e-40) = 1e320 -> Inf -> held.
         assert_eq!(
             crate::scaling::kr_guarded_update(f64::MAX, f64::MIN_POSITIVE),
             f64::MAX
         );
-        // m = Inf => d/Inf = 0 (not > 0) -> held.
         assert_eq!(crate::scaling::kr_guarded_update(1.0, f64::INFINITY), 1.0);
-        // m = NaN => NaN (not finite) -> held.
         assert_eq!(crate::scaling::kr_guarded_update(1.0, f64::NAN), 1.0);
     }
 
-    /// A subnormal off-diagonal coupling with no
-    /// diagonal in row 0 drives the unguarded iteration to `d = [NaN, 0.0]`
-    /// on a finite input. The guarded iteration must return all-finite,
-    /// strictly-positive factors, and the scaled entry must stay finite.
     #[test]
     fn kr_subnormal_coupling_stays_finite() {
         let m = CscMatrix::from_triplets(2, &[1, 1], &[0, 1], &[1e-320, 1.0]).unwrap();
@@ -182,9 +146,6 @@ mod tests {
         assert!(scaled.is_finite(), "scaled entry {scaled} must be finite");
     }
 
-    /// The one-pass scale factor must stay finite/positive for extreme row
-    /// maxima (`Inf` from an infinite entry, subnormal couplings) instead of
-    /// producing a `0`/`Inf` factor.
     #[test]
     fn onepass_guard_extremes() {
         assert_eq!(crate::scaling::inv_sqrt_scale_guarded(4.0), 0.5);
@@ -195,9 +156,6 @@ mod tests {
         assert!(g.is_finite() && g > 0.0);
     }
 
-    /// Diagonal matrix diag(2, 3, 5). The oracle scaling is
-    /// d = [1/sqrt(2), 1/sqrt(3), 1/sqrt(5)], so that
-    /// D*A*D = diag(1, 1, 1).
     #[test]
     fn diag_3x3() {
         let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
@@ -214,16 +172,10 @@ mod tests {
         }
     }
 
-    /// 2x2 matrix [[4, 2], [2, 9]]. Row max [i=0]: max(|4|, |2|) = 4;
-    /// row max [i=1]: max(|2|, |9|) = 9. After one KR sweep:
-    /// d = [1/2, 1/3]. Check D*A*D row norms converge to 1.
     #[test]
     fn sym_2x2() {
         let m = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[4.0, 2.0, 9.0]).unwrap();
         let (d, _) = compute_infnorm(&m);
-        // D*A*D:
-        //   [d0*d0*4, d0*d1*2]
-        //   [d0*d1*2, d1*d1*9]
         let a00 = d[0] * d[0] * 4.0;
         let a01 = d[0] * d[1] * 2.0;
         let a11 = d[1] * d[1] * 9.0;
@@ -234,10 +186,6 @@ mod tests {
         assert!((row1 - 1.0).abs() <= bound, "row1 max = {}", row1);
     }
 
-    /// Arrow matrix: diagonal [2, 3, 4, 5, 6, 7] with (5, 0..=4) = 1.
-    /// Row 5 has 5 off-diagonal entries plus the diagonal 7; its
-    /// initial inf-norm is max(1, 1, 1, 1, 1, 7) = 7. The first KR
-    /// sweep should shrink d[5] by sqrt(7).
     #[test]
     fn arrow_6x6() {
         let mut rows = Vec::new();
@@ -255,12 +203,9 @@ mod tests {
         }
         let m = CscMatrix::from_triplets(6, &rows, &cols, &vals).unwrap();
         let (d, _) = compute_infnorm(&m);
-        // After KR convergence, every row's max-magnitude entry in
-        // D*A*D should be ~ 1.
         for i in 0..6 {
             let mut row_max = 0.0f64;
             for j in 0..6 {
-                // Look up a[i, j] from lower triangle
                 let (ii, jj) = if i >= j { (i, j) } else { (j, i) };
                 let mut v = 0.0;
                 for k in m.col_ptr[jj]..m.col_ptr[jj + 1] {

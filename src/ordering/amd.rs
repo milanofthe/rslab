@@ -1,7 +1,5 @@
 use crate::sparse::csc::CscPattern;
 
-/// What a permuted pattern costs per entry (its gather and its column
-/// sorts).
 static PERMUTE_RATE: crate::parallel::Rate =
     crate::parallel::Rate::new(crate::constants::SORT_NS_PER_ENTRY);
 
@@ -26,23 +24,17 @@ static PERMUTE_RATE: crate::parallel::Rate =
 pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
     let n = pattern.n;
 
-    // Build inverse permutation: inv_perm[old] = new
     let mut inv_perm = vec![0usize; n];
     for (new, &old) in perm.iter().enumerate() {
         inv_perm[old] = new;
     }
 
-    // Pass 1: count entries per new column. Since the input is a full
-    // symmetric pattern, column `old_j` has exactly one entry for every
-    // off-diagonal neighbor (plus any diagonal) - we just re-bucket them
-    // into column `inv_perm[old_j]` one-for-one.
     let mut col_ptr = vec![0usize; n + 1];
     for old_j in 0..n {
         let new_j = inv_perm[old_j];
         let nnz_j = pattern.col_ptr[old_j + 1] - pattern.col_ptr[old_j];
         col_ptr[new_j + 1] = nnz_j;
     }
-    // Prefix sum
     for j in 0..n {
         col_ptr[j + 1] += col_ptr[j];
     }
@@ -50,10 +42,6 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
     let nnz = col_ptr[n];
     let mut row_idx = vec![0usize; nnz];
 
-    // Pass 2: new column `j` is old column `perm[j]` with its rows renumbered,
-    // sorted. Columns are independent, so contiguous blocks of them, balanced
-    // by entry count, fill in parallel; every column comes out the same as
-    // serially, whatever the thread count.
     let fill = |j0: usize, j1: usize, out: &mut [usize]| {
         let base = col_ptr[j0];
         for j in j0..j1 {
@@ -103,7 +91,6 @@ mod tests {
 
     #[test]
     fn test_permute_pattern() {
-        // Simple 3x3 tridiagonal: [[1,-1,0],[-1,2,-1],[0,-1,1]]
         let m = CscMatrix::from_triplets(
             3,
             &[0, 1, 1, 2, 2],
@@ -113,11 +100,9 @@ mod tests {
         .unwrap();
         let pat = m.symmetric_pattern();
 
-        // Reverse permutation: [2, 1, 0]
         let perm = vec![2, 1, 0];
         let permuted = permute_pattern(&pat, &perm);
 
-        // After reversing, the pattern should be the same (tridiagonal is symmetric)
         assert_eq!(permuted.n, 3);
         assert_eq!(permuted.col_ptr[3], pat.col_ptr[3]);
     }

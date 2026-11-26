@@ -33,29 +33,24 @@ impl EliminationTree {
         })
     }
 
-    /// Liu's union-find etree construction over an abstract column-entry view:
-    /// `cols(j)` yields the row indices of column `j` (any order; entries
-    /// `>= j` are skipped). The result is a unique function of the pattern.
     pub(crate) fn from_cols<I: Iterator<Item = usize>>(
         n: usize,
         cols: impl Fn(usize) -> I,
     ) -> Self {
         let mut parent: Vec<Option<usize>> = vec![None; n];
-        let mut ancestor = vec![0usize; n]; // union-find forest
+        let mut ancestor = vec![0usize; n];
 
         for j in 0..n {
-            ancestor[j] = j; // j is its own root initially
+            ancestor[j] = j;
             for i in cols(j) {
                 if i >= j {
-                    continue; // only process entries with i < j
+                    continue;
                 }
 
-                // Find the root of i's subtree (with path compression)
                 let mut r = i;
                 while ancestor[r] != r {
                     r = ancestor[r];
                 }
-                // Path compression: make all nodes on the path point to r
                 let mut node = i;
                 while node != r {
                     let next = ancestor[node];
@@ -63,10 +58,9 @@ impl EliminationTree {
                     node = next;
                 }
 
-                // If r != j, make j the parent of r
                 if r != j {
                     parent[r] = Some(j);
-                    ancestor[r] = j; // union: attach r's tree under j
+                    ancestor[r] = j;
                 }
             }
         }
@@ -74,9 +68,6 @@ impl EliminationTree {
         EliminationTree { parent, n }
     }
 
-    /// Compute children lists from parent pointers.
-    /// Children of every node in one flat array, each node's children
-    /// ascending: those of `v` are `idx[ptr[v]..ptr[v + 1]]`.
     pub(crate) fn children_flat(&self) -> (Vec<usize>, Vec<usize>) {
         let n = self.n;
         let mut ptr = vec![0usize; n + 1];
@@ -115,11 +106,9 @@ impl EliminationTree {
     /// Compute subtree sizes (number of nodes in each subtree, including self).
     pub fn subtree_sizes(&self) -> Vec<usize> {
         let mut sizes = vec![1usize; self.n];
-        // Process in reverse topological order (children before parents)
-        // Since parent[j] > j always, processing 0..n in order is fine
-        // if we accumulate into parents.
         for j in 0..self.n {
             if let Some(p) = self.parent[j] {
+                debug_assert!(p > j);
                 sizes[p] += sizes[j];
             }
         }
@@ -169,9 +158,6 @@ impl EliminationTree {
         for (pnum, &node) in post.iter().enumerate() {
             post_of[node] = pnum;
         }
-        // Initialize first[i] = its own postorder index. Walking
-        // the tree in postorder guarantees every child finalizes
-        // before its parent, so parent's `first` folds in children.
         let mut first = post_of.clone();
         for &node in post {
             if let Some(p) = self.parent[node] {
@@ -191,7 +177,6 @@ mod tests {
 
     #[test]
     fn test_etree_tridiagonal() {
-        // Tridiagonal 5x5: elimination tree is a path 0->1->2->3->4
         let m = CscMatrix::from_triplets(
             5,
             &[0, 1, 1, 2, 2, 3, 3, 4, 4],
@@ -206,12 +191,11 @@ mod tests {
         assert_eq!(etree.parent[1], Some(2));
         assert_eq!(etree.parent[2], Some(3));
         assert_eq!(etree.parent[3], Some(4));
-        assert_eq!(etree.parent[4], None); // root
+        assert_eq!(etree.parent[4], None);
     }
 
     #[test]
     fn test_etree_arrow() {
-        // Arrow matrix: node 0 is connected to all others.
         let m = CscMatrix::from_triplets(
             5,
             &[0, 1, 2, 3, 4, 1, 2, 3, 4],
@@ -222,16 +206,11 @@ mod tests {
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
 
-        // With natural ordering, eliminating 0 creates a clique among 1-4.
-        // parent[j] = min { i > j : L(i,j) != 0 }: column 0 has rows 1-4
-        // -> parent[0] = 1; column 1 gets fill rows 2-4 -> parent[1] = 2;
-        // and so on. The etree is the chain 0->1->2->3->4, root = 4.
         assert_eq!(etree.parent[4], None);
         assert_eq!(etree.roots(), vec![4]);
     }
 
     fn chain_etree(n: usize) -> EliminationTree {
-        // Build a chain 0->1->2->...->(n-1) directly.
         let mut parent = vec![None; n];
         for j in 0..n.saturating_sub(1) {
             parent[j] = Some(j + 1);
@@ -248,11 +227,9 @@ mod tests {
 
     #[test]
     fn test_postorder_star() {
-        // 4 leaves (0, 1, 2, 3) all parented to root 4.
         let parent = vec![Some(4), Some(4), Some(4), Some(4), None];
         let et = EliminationTree { parent, n: 5 };
         let post = et.postorder();
-        // Root must come last; leaves visited before root.
         assert_eq!(*post.last().unwrap(), 4);
         assert_eq!(post.len(), 5);
         let mut leaves: Vec<_> = post[..4].to_vec();
@@ -262,12 +239,10 @@ mod tests {
 
     #[test]
     fn test_postorder_two_roots() {
-        // Two disjoint chains: 0->1 (root 1) and 2->3 (root 3).
         let parent = vec![Some(1), None, Some(3), None];
         let et = EliminationTree { parent, n: 4 };
         let post = et.postorder();
         assert_eq!(post.len(), 4);
-        // Each child precedes its root. Both roots come at positions 1 and 3.
         let p0 = post.iter().position(|&x| x == 0).unwrap();
         let p1 = post.iter().position(|&x| x == 1).unwrap();
         let p2 = post.iter().position(|&x| x == 2).unwrap();
@@ -278,8 +253,6 @@ mod tests {
 
     #[test]
     fn test_first_descendants_chain() {
-        // Chain 0->1->2->3->4. Postorder is [0,1,2,3,4].
-        // Subtree of i is {0, 1, ..., i}. First descendant is 0 for all.
         let et = chain_etree(5);
         let post = et.postorder();
         let first = et.first_descendants(&post);
@@ -288,23 +261,19 @@ mod tests {
 
     #[test]
     fn test_first_descendants_leaves() {
-        // For a leaf, first[leaf] = its own postorder number.
         let parent = vec![Some(4), Some(4), Some(4), Some(4), None];
         let et = EliminationTree { parent, n: 5 };
         let post = et.postorder();
         let first = et.first_descendants(&post);
-        // Each leaf's first is its own postorder index.
         for leaf in 0..4 {
             let ppos = post.iter().position(|&x| x == leaf).unwrap();
             assert_eq!(first[leaf], ppos);
         }
-        // Root's first = min of the 4 leaf postorder numbers = 0.
         assert_eq!(first[4], 0);
     }
 
     #[test]
     fn test_etree_diagonal() {
-        // Diagonal: no off-diagonal entries -> forest of singletons
         let m = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0; 4]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
@@ -317,7 +286,6 @@ mod tests {
 
     #[test]
     fn test_etree_children() {
-        // Tridiagonal: children of node k = [k-1] (except 0)
         let m =
             CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
                 .unwrap();
@@ -333,7 +301,6 @@ mod tests {
 
     #[test]
     fn test_subtree_sizes() {
-        // Tridiagonal 4x4: chain 0->1->2->3
         let m =
             CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
                 .unwrap();

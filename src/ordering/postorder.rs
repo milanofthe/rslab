@@ -2,11 +2,6 @@ use super::elimination_tree::EliminationTree;
 
 #[cfg(test)]
 thread_local! {
-    /// Work counter: total number of child-list elements
-    /// materialized+sorted across all per-node sorts in [`postorder`].
-    /// Linear in `n` for the sort-once-per-node traversal; quadratic for
-    /// a sort-on-every-stack-visit version. Test-only; compiled out of
-    /// production builds.
     static SORT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -51,8 +46,6 @@ pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, 
     );
     let mut late = Vec::new();
     postorder_with(etree, |kids, sizes| {
-        // Unbiased children first, the biased ones (to be merged into the
-        // parent) last, next to it; each part by subtree size.
         late.clear();
         late.extend(kids.iter().copied().filter(|&c| bias[c]));
         let mut w = 0;
@@ -69,9 +62,6 @@ pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, 
     })
 }
 
-/// The postorder visiting each node's children in the order `order_children`
-/// leaves them in (called once per node on its children, ascending, with the
-/// subtree sizes); roots by subtree size. Returns `(postorder, inverse)`.
 fn postorder_with(
     etree: &EliminationTree,
     mut order_children: impl FnMut(&mut [usize], &[usize]),
@@ -116,7 +106,6 @@ mod tests {
 
     #[test]
     fn test_postorder_tridiagonal() {
-        // Chain: 0->1->2->3. Postorder should be [0, 1, 2, 3].
         let m =
             CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
                 .unwrap();
@@ -125,10 +114,8 @@ mod tests {
         let (order, inv) = postorder(&etree);
 
         assert_eq!(order.len(), 4);
-        // In a chain, postorder visits from leaf to root
         assert_eq!(order, vec![0, 1, 2, 3]);
 
-        // Verify inverse
         for (k, &node) in order.iter().enumerate() {
             assert_eq!(inv[node], k);
         }
@@ -136,7 +123,6 @@ mod tests {
 
     #[test]
     fn test_postorder_valid_topological_order() {
-        // For any matrix: every child appears before its parent in postorder
         let m = CscMatrix::from_triplets(
             5,
             &[0, 1, 2, 3, 4, 1, 2, 3, 4],
@@ -150,7 +136,6 @@ mod tests {
 
         assert_eq!(order.len(), 5);
 
-        // Verify topological property: parent appears after child
         for j in 0..5 {
             if let Some(p) = etree.parent[j] {
                 assert!(
@@ -167,7 +152,6 @@ mod tests {
 
     #[test]
     fn test_postorder_diagonal() {
-        // Forest of singletons: any order is a valid postorder
         let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0; 3]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
@@ -188,11 +172,9 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let (order, inv) = postorder(&etree);
 
-        // order[inv[j]] == j for all j
         for j in 0..4 {
             assert_eq!(order[inv[j]], j);
         }
-        // inv[order[k]] == k for all k
         for k in 0..4 {
             assert_eq!(inv[order[k]], k);
         }
@@ -209,21 +191,15 @@ mod tests {
         assert!(inv.is_empty());
     }
 
-    /// Build a star elimination tree: nodes `0..n-1` are leaves whose only
-    /// parent is the last node `n-1` (the root). This is the etree of an
-    /// arrow/bordered matrix whose dense border sits at the *trailing*
-    /// index (`A[n-1, i] != 0` for every `i < n-1`) - exactly the shape
-    /// AMD produces for the dense-border KKT rows in this codebase's tests.
     fn star_etree(n: usize) -> EliminationTree {
-        // Lower-triangle: diagonal + a dense trailing column n-1.
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         for i in 0..n {
             rows.push(i);
-            cols.push(i); // diagonal
+            cols.push(i);
             if i < n - 1 {
                 rows.push(n - 1);
-                cols.push(i); // (row n-1, col i): border in the lower triangle
+                cols.push(i);
             }
         }
         let vals = vec![1.0; rows.len()];
@@ -232,24 +208,11 @@ mod tests {
         EliminationTree::from_pattern(&pat)
     }
 
-    /// A `postorder` that re-cloned and re-sorted `children[node]` on every
-    /// stack visit would make a node with `c` children (on top of the stack
-    /// `c+1` times) pay O(c^2*log c). On a star etree (one root with `n-1`
-    /// children) that is O(n^2*log n) - quadratic - in the symbolic
-    /// pipeline.
-    ///
-    /// The check is deterministic via the `SORT_WORK` counter (total
-    /// child-list elements materialized across all per-node sorts), so no
-    /// flaky wall-clock timing is needed. Sorting per visit materializes the
-    /// root's `(n-1)`-element child list `n` times -> `~n^2` elements;
-    /// sorting once per node materializes it exactly once -> `~n` elements.
-    /// The assertion `work <= 4*n` separates the two.
     #[test]
     fn test_postorder_star_sort_work_is_linear() {
         let n = 2000;
         let etree = star_etree(n);
 
-        // Sanity: this really is a star (root n-1, all others its children).
         assert_eq!(etree.children()[n - 1].len(), n - 1);
         assert_eq!(etree.roots(), vec![n - 1]);
 
@@ -257,7 +220,6 @@ mod tests {
         let (order, inv) = postorder(&etree);
         let work = SORT_WORK.with(|w| w.get());
 
-        // Output correctness still holds (every child before its parent).
         assert_eq!(order.len(), n);
         for j in 0..n {
             if let Some(p) = etree.parent[j] {
@@ -265,8 +227,6 @@ mod tests {
             }
         }
 
-        // Child-sorting work is linear, not quadratic. Sort-on-every-visit
-        // code would materialize ~n^2 elements here.
         assert!(
             work <= 4 * n,
             "postorder sort work {work} exceeds the linear bound {} (n={n}); \

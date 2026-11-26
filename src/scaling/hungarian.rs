@@ -24,15 +24,6 @@
 //! require wrapping `f64` distances in a tie-breakable ordered type -
 //! mirroring SPRAL's index-based heap produces cleaner code.
 
-/// A sparse non-negative cost graph for the Hungarian algorithm.
-///
-/// Stored in CSC format on a square pattern (rows = cols = n).
-/// All costs must be finite and non-negative; the MC64 wrapper
-/// ensures this via per-column normalization of log absolute values.
-/// Explicit zero entries in the pattern are allowed and represent
-/// "cost 0" edges (which are the column-maximum entries after
-/// normalization). The pattern is the matrix's own where the costs keep
-/// every entry of it (borrowed, no copy), else built for the costs.
 #[derive(Debug, Clone)]
 pub(crate) struct CostGraph<'a> {
     pub n: usize,
@@ -41,7 +32,6 @@ pub(crate) struct CostGraph<'a> {
     pub cost: Vec<f64>,
 }
 
-/// Result of a Hungarian matching run.
 #[derive(Debug, Clone)]
 pub(crate) struct Matching {
     /// `perm[j]` is the row matched to column `j`. `usize::MAX`
@@ -58,38 +48,13 @@ pub(crate) struct Matching {
     pub n_matched: usize,
 }
 
-/// Sentinel for "unmatched" in the working arrays.
 const NONE: usize = usize::MAX;
 
-/// A large finite value used as "+inf" for shortest-path distances.
-/// We avoid `f64::INFINITY` in arithmetic to match SPRAL's `RINF`
-/// style (it uses `huge(1.0_wp)/10`, a large finite constant). Any
-/// value strictly larger than the maximum finite cost in the graph
-/// suffices; `f64::MAX / 2.0` leaves plenty of headroom and never
-/// overflows under the `dnew = vj + cost - u[i]` arithmetic.
 const RINF: f64 = f64::MAX / 2.0;
 
-/// Index-based binary min-heap keyed on an external `d` array,
-/// mirroring SPRAL's `q` / `l` / `heap_update` / `heap_delete` /
-/// `heap_pop`. The heap stores row indices `i`; the key for row `i`
-/// is `d[i]`. `pos[i]` is the 1-based position of `i` in `heap`, or
-/// `0` when `i` is not currently in the heap.
-///
-/// Decrease-key is supported via `update`, which assumes `d[i]` has
-/// just been lowered and sifts `i` up. Arbitrary-position deletion
-/// is supported via `delete`, which sifts either up or down as
-/// needed. These together are what the shortest-path search needs.
-///
-/// 1-based indexing (SPRAL style) is preserved internally to make
-/// parent/child arithmetic trivial (`parent = pos / 2`); externally
-/// the type exposes 0-based row indices.
 struct IndexHeap {
-    /// `heap[1..=len]` contains row indices. `heap[0]` is a dummy.
     heap: Vec<usize>,
-    /// `pos[i]` = 1-based position of `i` in `heap`, or `0` if not
-    /// present. The SPRAL `l(i)` array.
     pos: Vec<usize>,
-    /// Number of live entries in the heap.
     len: usize,
 }
 
@@ -103,14 +68,6 @@ impl IndexHeap {
         }
     }
 
-    /// Return the heap to the empty state for reuse across augmenting
-    /// searches without reallocating. `rows` must list every index whose
-    /// `pos` could be nonzero - in `hungarian_match` that is exactly the
-    /// `touched` set, since an index is only ever heap-inserted right
-    /// after being pushed to `touched`. The `heap` backing array is left
-    /// with stale entries; `len = 0` makes them unreachable. This turns
-    /// the per-iteration `IndexHeap::new(m)` (O(m) alloc+zero per
-    /// unmatched column, i.e. O(n*m) overall) into O(|touched|).
     fn reset(&mut self, rows: &[usize]) {
         rsprobe::add!(DEBUG, "heap slots", rows.len());
         for &i in rows {
@@ -131,8 +88,6 @@ impl IndexHeap {
         self.pos[i] != 0
     }
 
-    /// Called when `d[i]` has just been decreased (or `i` was just
-    /// inserted with `pos[i] == len`). Sifts `i` upward in the heap.
     fn update(&mut self, i: usize, d: &[f64]) {
         let mut p = self.pos[i];
         if p <= 1 {
@@ -154,15 +109,13 @@ impl IndexHeap {
         self.pos[i] = p;
     }
 
-    /// Insert row `i` (assumes `!contains(i)` and `d[i]` is set).
     fn insert(&mut self, i: usize, d: &[f64]) {
+        debug_assert!(!self.contains(i));
         self.len += 1;
         self.pos[i] = self.len;
         self.update(i, d);
     }
 
-    /// Delete the entry at 1-based heap position `pos0`. Mirrors
-    /// SPRAL's `heap_delete`.
     fn delete(&mut self, pos0: usize, d: &[f64]) {
         let removed = self.heap[pos0];
         self.pos[removed] = 0;
@@ -175,7 +128,6 @@ impl IndexHeap {
         self.len -= 1;
         let mut p = pos0;
 
-        // Sift up.
         if p > 1 {
             loop {
                 let parent = p / 2;
@@ -197,7 +149,6 @@ impl IndexHeap {
             return;
         }
 
-        // Otherwise sift down.
         loop {
             let mut child = 2 * p;
             if child > self.len {
@@ -223,7 +174,6 @@ impl IndexHeap {
         self.pos[idx] = p;
     }
 
-    /// Pop and return the minimum-key row. Mirrors SPRAL's `heap_pop`.
     fn pop(&mut self, d: &[f64]) -> usize {
         let top = self.heap[1];
         self.delete(1, d);
@@ -231,24 +181,6 @@ impl IndexHeap {
     }
 }
 
-/// Greedy initialization, mirroring SPRAL's `hungarian_init_heurisitic`
-/// (`ref/spral/src/scaling.f90:810-929`). Two passes:
-///
-/// 1. Row-minimum pass: set `u[i]` to the smallest cost among edges
-///    incident on row `i`, remembering the column `j` and CSC index
-///    `k` that achieved it.
-/// 2. Row-claim pass: for each row, if its candidate column is not
-///    yet claimed and is not dense (more than `m/10` entries when
-///    `m > 50`), match on that edge.
-/// 3. Improve-assignment pass: for each still-unmatched column,
-///    scan it for the smallest reduced cost `val - u[i]` and either
-///    match directly or try a length-2 augmentation via another
-///    already-matched column.
-///
-/// On exit, `iperm[i]` is the column matched to row `i` (or `NONE`),
-/// `jperm[j]` is the CSC index of the matched entry for column `j`
-/// (or `NONE`), and `u[i]` is set to `RINF` for empty rows (rows
-/// with no incident edges), finite otherwise.
 fn hungarian_init_heuristic(
     cost: &CostGraph<'_>,
     iperm: &mut [usize],
@@ -259,16 +191,10 @@ fn hungarian_init_heuristic(
     let m = n;
     let mut num = 0usize;
 
-    // Scratch used across phases. `l[i]` holds the CSC index `k` of
-    // the row-minimum edge for row `i` during phase 1 (SPRAL's `l`).
-    let mut l_row: Vec<usize> = vec![NONE; m];
-    // `d_col[j]` is the improvement value `d(j)` in SPRAL phase 3.
-    let mut d_col: Vec<f64> = vec![0.0; n];
-    // `search_from[j]` is the CSC scan position reached in column
-    // `j` during phase 3's length-2 augmentation attempts.
+    let mut row_min_edge: Vec<usize> = vec![NONE; m];
+    let mut col_reduced_min: Vec<f64> = vec![0.0; n];
     let mut search_from: Vec<usize> = (0..n).map(|j| cost.col_ptr[j]).collect();
 
-    // Phase 1: record smallest entry in each row.
     for ui in u.iter_mut().take(m) {
         *ui = RINF;
     }
@@ -278,13 +204,11 @@ fn hungarian_init_heuristic(
             if cost.cost[k] <= u[i] {
                 u[i] = cost.cost[k];
                 iperm[i] = j;
-                l_row[i] = k;
+                row_min_edge[i] = k;
             }
         }
     }
 
-    // Phase 2: claim row-minimum edges where possible, skipping
-    // dense columns (SPRAL's "don't assign on dense cols" guard).
     for i in 0..m {
         let j = iperm[i];
         if j == NONE {
@@ -302,23 +226,20 @@ fn hungarian_init_heuristic(
         }
         num += 1;
         iperm[i] = j;
-        jperm[j] = l_row[i];
+        jperm[j] = row_min_edge[i];
     }
     if num == n {
         return num;
     }
 
-    // Phase 3: scan unmatched columns for improvement augmentations.
     let mut length2_scans = 0u64;
     'improve_assign: for j in 0..n {
         if jperm[j] != NONE {
             continue;
         }
         if cost.col_ptr[j] >= cost.col_ptr[j + 1] {
-            continue; // empty column
+            continue;
         }
-        // Find smallest `val(k) - u[i]` in column j, with tie-break
-        // preferring a first-unmatched row.
         let start = cost.col_ptr[j];
         let end = cost.col_ptr[j + 1];
         let mut i0 = cost.row_idx[start];
@@ -330,18 +251,14 @@ fn hungarian_init_heuristic(
             if di > vj {
                 continue;
             }
-            if di == vj && di != RINF {
-                // Tie-break: prefer first unmatched row.
-                if iperm[i] != NONE || iperm[i0] == NONE {
-                    continue;
-                }
+            if di == vj && di != RINF && (iperm[i] != NONE || iperm[i0] == NONE) {
+                continue;
             }
             vj = di;
             i0 = i;
             k0 = k;
         }
-        d_col[j] = vj;
-        // If `i0` is unmatched, match it directly.
+        col_reduced_min[j] = vj;
         if iperm[i0] == NONE {
             num += 1;
             jperm[j] = k0;
@@ -349,7 +266,6 @@ fn hungarian_init_heuristic(
             search_from[j] = k0 + 1;
             continue;
         }
-        // Otherwise attempt a length-2 augmentation.
         for k in k0..end {
             let i = cost.row_idx[k];
             if (cost.cost[k] - u[i]) > vj {
@@ -366,7 +282,7 @@ fn hungarian_init_heuristic(
                 if iperm[ii] != NONE {
                     continue;
                 }
-                if (cost.cost[kk] - u[ii]) <= d_col[jj] {
+                if (cost.cost[kk] - u[ii]) <= col_reduced_min[jj] {
                     jperm[jj] = kk;
                     iperm[ii] = jj;
                     search_from[jj] = kk + 1;
@@ -385,35 +301,9 @@ fn hungarian_init_heuristic(
     num
 }
 
-/// Solve the minimum-cost perfect bipartite matching problem via
-/// the shortest-augmenting-path Hungarian algorithm.
-///
-/// At termination the dual variables satisfy
-/// `u[i] + v[j] <= cost[i][j]` for every edge, with equality on
-/// matched edges (the LP complementary-slackness conditions).
-///
-/// Algorithm: Duff & Koster 2001 section 4, mirroring SPRAL's
-/// `hungarian_match` at `ref/spral/src/scaling.f90:938-1171`.
-///
-/// Structure of the working state (following SPRAL line-by-line):
-/// - `iperm[i]` = column matched to row `i`, or `NONE`.
-/// - `jperm[j]` = CSC index `k` of the matched entry for column `j`,
-///   or `NONE`. The matched row is `row_idx[jperm[j]]`.
-/// - `u[i]`, `v[j]` = dual variables.
-/// - `d[i]` = current shortest-path distance from the current root
-///   column to row `i`, initialized to `RINF` at the start of each
-///   augmenting search.
-/// - `pr[j]` = parent column on the augmenting tree toward the root.
-/// - `out[j]` = CSC index of the edge by which column `j` was
-///   first reached (so `row_idx[out[j]]` is the row along the tree).
-/// - `visited[i] = true` means row `i` has been extracted from the
-///   shortest-path search and its `d[i]` is final (SPRAL's `up`
-///   region of `q`, which here is represented by a boolean plus the
-///   accumulated `visited_rows` list for the post-update sweep).
-/// - `heap` is the open-set min-heap keyed on `d[i]`.
 pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
     let n = cost.n;
-    let m = n; // square cost graph
+    let m = n;
 
     let mut iperm: Vec<usize> = vec![NONE; m];
     let mut jperm: Vec<usize> = vec![NONE; n];
@@ -429,12 +319,8 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
         };
     }
 
-    // Greedy initialization.
     let mut num = hungarian_init_heuristic(cost, &mut iperm, &mut jperm, &mut u);
 
-    // Clamp any `u[i] == RINF` (set for empty rows) to 0 so that
-    // the reduced-cost arithmetic below never produces `-RINF`.
-    // Empty rows cannot participate in the matching anyway.
     for ui in u.iter_mut() {
         if *ui >= RINF {
             *ui = 0.0;
@@ -446,29 +332,15 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
         return build_matching(cost, iperm, jperm, u, v, num);
     }
 
-    // Main loop: for each unmatched column, run a shortest-path
-    // search rooted at that column and augment.
     let mut d: Vec<f64> = vec![RINF; m];
     let mut pr: Vec<usize> = vec![NONE; n];
     let mut out_idx: Vec<usize> = vec![NONE; n];
-    // `visited[i]` = true iff row `i` has been finalized during the
-    // current search (moved to SPRAL's "q(up:m)" region). These are
-    // the rows whose duals get updated when the augmenting path is
-    // found.
     let mut visited: Vec<bool> = vec![false; m];
-    // Rows touched by this search, so the end-of-iteration reset
-    // can clear only what was changed rather than re-allocating.
     let mut touched: Vec<usize> = Vec::with_capacity(m);
     let mut visited_rows: Vec<usize> = Vec::with_capacity(m);
-    // Allocated once and reused across all augmenting searches; reset
-    // incrementally (over `touched`) at the end of each iteration, the
-    // same way `d` and `visited` are. Reallocating it per unmatched
-    // column would cost O(n*m) alloc+zeroing, which dominates MC64 on
-    // large near-tree KKTs.
     let mut heap = IndexHeap::new(m);
     let (mut searches, mut touched_rows, mut edge_scans) = (0u64, 0u64, 0u64);
 
-    // Progress in columns passed.
     let steps = crate::progress::Steps::new(rsprobe::active!(), n as u64);
     let report = |step: Option<u64>| {
         if let Some(step) = step {
@@ -482,31 +354,26 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
         }
         searches += 1;
 
-        // Per-iteration working state.
-        let mut csp = RINF; // cost of the shortest augmenting path
-        let mut isp: usize = NONE; // CSC index of the terminal edge
-        let mut jsp: usize = NONE; // column that owns that edge
+        let mut shortest_cost = RINF;
+        let mut terminal_edge: usize = NONE;
+        let mut terminal_col: usize = NONE;
         visited_rows.clear();
         touched.clear();
 
-        // Build the shortest-path tree from column `jord`.
         let j = jord;
         pr[j] = NONE;
 
-        // Scan the root column: each entry is either a direct
-        // augmenting-path terminator (if the row is unmatched) or
-        // a seed for the open set (if the row is matched).
         edge_scans += (cost.col_ptr[j + 1] - cost.col_ptr[j]) as u64;
         for k in cost.col_ptr[j]..cost.col_ptr[j + 1] {
             let i = cost.row_idx[k];
             let dnew = cost.cost[k] - u[i];
-            if dnew >= csp {
+            if dnew >= shortest_cost {
                 continue;
             }
             if iperm[i] == NONE {
-                csp = dnew;
-                isp = k;
-                jsp = j;
+                shortest_cost = dnew;
+                terminal_edge = k;
+                terminal_col = j;
             } else if dnew < d[i] {
                 if d[i] == RINF {
                     touched.push(i);
@@ -523,13 +390,12 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
             }
         }
 
-        // Main shortest-path loop.
         loop {
             if heap.is_empty() {
                 break;
             }
             let top = heap.peek();
-            if d[top] >= csp {
+            if d[top] >= shortest_cost {
                 break;
             }
             let q0 = heap.pop(&d);
@@ -537,11 +403,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
             visited_rows.push(q0);
             let dq0 = d[q0];
 
-            // Scan the column matched to row q0.
             let j2 = iperm[q0];
-            // SPRAL formula: vj = dq0 - val(jperm(j)) + dualu(q0).
-            // This is the accumulated reduced-cost offset to apply
-            // to each outgoing edge.
             let vj = dq0 - cost.cost[jperm[j2]] + u[q0];
             edge_scans += (cost.col_ptr[j2 + 1] - cost.col_ptr[j2]) as u64;
             for k in cost.col_ptr[j2]..cost.col_ptr[j2 + 1] {
@@ -550,14 +412,13 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
                     continue;
                 }
                 let dnew = vj + cost.cost[k] - u[i];
-                if dnew >= csp {
+                if dnew >= shortest_cost {
                     continue;
                 }
                 if iperm[i] == NONE {
-                    // Unmatched row: candidate terminator.
-                    csp = dnew;
-                    isp = k;
-                    jsp = j2;
+                    shortest_cost = dnew;
+                    terminal_edge = k;
+                    terminal_col = j2;
                 } else {
                     let di = d[i];
                     if di <= dnew {
@@ -579,13 +440,12 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
             }
         }
 
-        if csp < RINF {
-            // Flip the matching along the augmenting path.
+        if shortest_cost < RINF {
             num += 1;
-            let i_term = cost.row_idx[isp];
-            iperm[i_term] = jsp;
-            jperm[jsp] = isp;
-            let mut j_cur = jsp;
+            let i_term = cost.row_idx[terminal_edge];
+            iperm[i_term] = terminal_col;
+            jperm[terminal_col] = terminal_edge;
+            let mut j_cur = terminal_col;
             for _ in 0..num {
                 let jj = pr[j_cur];
                 if jj == NONE {
@@ -597,22 +457,17 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
                 jperm[jj] = k;
                 j_cur = jj;
             }
-            // Update dual variables for all finalized rows.
             for &i in &visited_rows {
-                u[i] += d[i] - csp;
+                u[i] += d[i] - shortest_cost;
             }
         }
 
-        // Reset per-iteration scratch for rows touched this round.
         for &i in &touched {
             d[i] = RINF;
         }
         for &i in &visited_rows {
             visited[i] = false;
         }
-        // Return the heap to empty for the next search. Every heap member
-        // is in `touched`, so clearing their `pos` (plus `len = 0`) is a
-        // complete reset.
         touched_rows += touched.len() as u64;
         heap.reset(&touched);
     }
@@ -625,12 +480,6 @@ pub(crate) fn hungarian_match(cost: &CostGraph<'_>) -> Matching {
     build_matching(cost, iperm, jperm, u, v, num)
 }
 
-/// Compute column duals from the final matching. Mirrors
-/// `scaling.f90:1158-1169`: for each matched column `j` with
-/// `jperm[j] = k`, the complementary-slackness equality
-/// `u[row(k)] + v[j] == cost[k]` forces
-/// `v[j] = cost[k] - u[row(k)]`. Unmatched columns get `v[j] = 0`.
-/// (Zeroing `u` for never-matched rows happens in [`build_matching`].)
 fn finalize_duals(cost: &CostGraph, jperm: &[usize], u: &[f64], v: &mut [f64]) {
     for (j, vj) in v.iter_mut().enumerate() {
         if jperm[j] != NONE {
@@ -643,9 +492,6 @@ fn finalize_duals(cost: &CostGraph, jperm: &[usize], u: &[f64], v: &mut [f64]) {
     }
 }
 
-/// Convert the working `(iperm, jperm, u, v, num)` state into the
-/// public `Matching` return type. Also applies the "zero u for
-/// unmatched rows" rule from `scaling.f90:1169`.
 fn build_matching(
     cost: &CostGraph<'_>,
     iperm: Vec<usize>,
@@ -691,9 +537,6 @@ mod tests {
     use super::*;
     use crate::test_constants::linearithmic_growth;
 
-    /// Build a `CostGraph` from dense (row, col, cost) triples.
-    /// Only used in tests - converts a small list of entries into
-    /// the CSC format the Hungarian kernel expects.
     fn build_cost_graph(n: usize, entries: &[(usize, usize, f64)]) -> CostGraph<'static> {
         let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
         for &(r, c, v) in entries {
@@ -718,9 +561,6 @@ mod tests {
         }
     }
 
-    /// Verify the LP optimality conditions for a `Matching` on a
-    /// `CostGraph`: for every edge `u[i] + v[j] <= cost[i][j]` with
-    /// equality on matched edges.
     fn assert_matching_optimal(cost: &CostGraph, m: &Matching) {
         let n = cost.n;
         assert_eq!(m.u.len(), n);
@@ -758,8 +598,6 @@ mod tests {
         }
     }
 
-    /// 3x3 identity pattern: matching is trivially identity with
-    /// zero duals.
     #[test]
     fn match_diagonal_3x3_identity() {
         let cost = build_cost_graph(3, &[(0, 0, 0.0), (1, 1, 0.0), (2, 2, 0.0)]);
@@ -769,35 +607,17 @@ mod tests {
         assert_matching_optimal(&cost, &m);
     }
 
-    /// 3x3 with a non-identity permutation pattern:
-    ///   cost(0, 1) = 0
-    ///   cost(1, 2) = 0
-    ///   cost(2, 0) = 0
-    /// The only perfect matching is 0<->1, 1<->2, 2<->0 (i.e., col 0 is
-    /// matched with row 2, etc.). Identity is NOT a valid matching
-    /// on this sparsity pattern.
     #[test]
     fn match_permutation_3x3() {
         let cost = build_cost_graph(3, &[(1, 0, 0.0), (2, 1, 0.0), (0, 2, 0.0)]);
         let m = hungarian_match(&cost);
         assert_eq!(m.n_matched, 3);
-        // perm[j] is the row matched to column j
         assert_eq!(m.perm[0], 1, "col 0 should match row 1");
         assert_eq!(m.perm[1], 2, "col 1 should match row 2");
         assert_eq!(m.perm[2], 0, "col 2 should match row 0");
         assert_matching_optimal(&cost, &m);
     }
 
-    /// 3x3 with a non-trivial cost matrix where the answer requires
-    /// actual Hungarian logic. The costs are:
-    ///    col 0: row 0 -> 3, row 1 -> 1
-    ///    col 1: row 0 -> 2, row 2 -> 4
-    ///    col 2: row 1 -> 5, row 2 -> 0
-    /// Minimum total cost is 1 + 2 + 0 = 3 via matching
-    /// 0<->1, 1<->0, 2<->2 (col 0 <-> row 1, col 1 <-> row 0, col 2 <-> row 2).
-    /// Alternative matching 0<->0, 1<->2, 2<->1 has cost 3 + 4 + 5 = 12.
-    /// Only the first is optimal. The identity `perm = [0, 1, 2]`
-    /// is not even feasible: (1,1) has no entry in this graph.
     #[test]
     fn match_hand_computed_3x3() {
         let cost = build_cost_graph(
@@ -825,20 +645,6 @@ mod tests {
         );
     }
 
-    /// 4x4 dense cost matrix. The optimal matching minimizes
-    /// `sum cost[perm[j]][j]`. For
-    ///
-    ///        j=0 j=1 j=2 j=3
-    ///   i=0   1   2   3   4
-    ///   i=1   2   4   6   8
-    ///   i=2   3   6   1   2
-    ///   i=3   4   8   2   1
-    ///
-    /// Brute-force enumeration of all 24 permutations confirms the
-    /// minimum is 6, achieved by matching col0->row1(2), col1->row0(2),
-    /// col2->row2(1), col3->row3(1). The symmetric alternative
-    /// col0->row0(1), col1->row1(4), col2->row2(1), col3->row3(1)
-    /// totals 7 and is not optimal.
     #[test]
     fn match_dense_4x4() {
         let n = 4;
@@ -866,19 +672,8 @@ mod tests {
         );
     }
 
-    /// 5x5 sparse pattern with non-trivial connectivity. The pattern
-    /// forces most columns to use specific rows because alternatives
-    /// are absent. Exercises the shortest-path search through a
-    /// chain of augmentations (no one-shot greedy init suffices).
     #[test]
     fn match_sparse_5x5() {
-        // Column 0: rows 0,1 with costs (10, 1)
-        // Column 1: rows 0,2 with costs (1, 10)
-        // Column 2: rows 1,3 with costs (10, 1)
-        // Column 3: rows 2,4 with costs (1, 10)
-        // Column 4: rows 3,4 with costs (10, 1)
-        // Optimal matching: col0->row1(1), col1->row0(1), col2->row3(1),
-        // col3->row2(1), col4->row4(1). Total = 5.
         let cost = build_cost_graph(
             5,
             &[
@@ -897,7 +692,6 @@ mod tests {
         let m = hungarian_match(&cost);
         assert_eq!(m.n_matched, 5);
         assert_matching_optimal(&cost, &m);
-        // Sum of matched costs should be the optimum (5.0).
         let mut total = 0.0;
         for j in 0..5 {
             for k in cost.col_ptr[j]..cost.col_ptr[j + 1] {
@@ -913,8 +707,6 @@ mod tests {
         );
     }
 
-    /// Deterministic LCG (Numerical Recipes constants) for building
-    /// reproducible synthetic cost graphs without an RNG dependency.
     struct Lcg(u64);
     impl Lcg {
         fn next_u64(&mut self) -> u64 {
@@ -929,12 +721,6 @@ mod tests {
         }
     }
 
-    /// Build an nxn cost graph with `deg` distinct random rows per
-    /// column and random positive costs. With small constant `deg`,
-    /// the greedy init leaves a constant fraction of columns unmatched,
-    /// so the main augmenting loop runs Theta(n) shortest-path searches -
-    /// exactly the near-tree regime where a per-column heap
-    /// reallocation would be O(n*m). nnz = deg*n grows linearly in n.
     fn gen_random_sparse(n: usize, deg: usize, seed: u64) -> CostGraph<'static> {
         let mut rng = Lcg(seed);
         let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
@@ -1023,17 +809,8 @@ mod tests {
         }
     }
 
-    /// Structurally singular 3x3: only two distinct rows appear in
-    /// the pattern (row 0 appears in two columns, but row 2 never
-    /// appears at all), so at most two columns can be matched. The
-    /// algorithm should report `n_matched < n` and leave the
-    /// unmatchable column with `perm[j] == usize::MAX`, without
-    /// panicking or producing infeasible duals.
     #[test]
     fn match_structurally_singular_3x3() {
-        // col 0: row 0, row 1
-        // col 1: row 0, row 1
-        // col 2: row 0          (only row 0; singular)
         let cost = build_cost_graph(
             3,
             &[
@@ -1046,7 +823,6 @@ mod tests {
         );
         let m = hungarian_match(&cost);
         assert_eq!(m.n_matched, 2, "only 2 of 3 columns should match");
-        // Exactly one column is unmatched.
         let n_unmatched = m.perm.iter().filter(|&&p| p == usize::MAX).count();
         assert_eq!(n_unmatched, 1);
         assert_matching_optimal(&cost, &m);
