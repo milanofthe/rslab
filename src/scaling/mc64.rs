@@ -118,18 +118,19 @@ pub(crate) fn compute_matching_general<T: crate::scalar::Scalar>(
         rest = tail;
     }
     let scan = crate::parallel::Work::of(entries, &COLMAX_RATE);
-    let cmax: Vec<f64> = crate::parallel::map_owned(cols, scan, |col| {
-        let top = col
-            .iter()
-            .copied()
-            .filter(|l| !l.is_nan())
-            .fold(f64::NEG_INFINITY, f64::max);
-        let top = if top.is_finite() { top } else { 0.0 };
-        for c in col.iter_mut() {
-            *c = top - *c;
-        }
-        top
-    });
+    let cmax: Vec<f64> =
+        crate::parallel::map_owned::<crate::parallel::Rayon, _, _>(cols, scan, |col| {
+            let top = col
+                .iter()
+                .copied()
+                .filter(|l| !l.is_nan())
+                .fold(f64::NEG_INFINITY, f64::max);
+            let top = if top.is_finite() { top } else { 0.0 };
+            for c in col.iter_mut() {
+                *c = top - *c;
+            }
+            top
+        });
     let (col_ptr, row_idx) = if cost.iter().any(|c| c.is_nan()) {
         let mut col_ptr = vec![0usize; n + 1];
         let mut row_idx = Vec::with_capacity(a.row_idx.len());

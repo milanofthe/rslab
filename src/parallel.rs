@@ -23,8 +23,8 @@ pub use rspool::rayon::{
     Rayon,
 };
 pub use rspool::{
-    as_piece, chunks_mut, current, install, install_lent, is_lent, map, map_init, ranges, share_of,
-    Disjoint, Dispatch, Go, Lent, Piece, Pool, Rate, Serial, Spawn, Task, Work,
+    as_piece, chunks_mut, current, install, install_lent, is_lent, map, map_init, map_owned,
+    ranges, share_of, Disjoint, Dispatch, Go, Lent, Piece, Pool, Rate, Serial, Spawn, Task, Work,
 };
 
 use crate::constants::COMPLEX_OPS;
@@ -84,31 +84,8 @@ pub(crate) fn zip_mut<A: Sync, S: Send>(
     });
 }
 
-pub(crate) fn map_owned<A: Send, R: Send>(
-    items: Vec<A>,
-    work: Work<'_>,
-    f: impl Fn(A) -> R + Sync + Send,
-) -> Vec<R> {
-    let mut slots: Vec<(Option<A>, Option<R>)> =
-        items.into_iter().map(|a| (Some(a), None)).collect();
-    chunks_mut::<Rayon, _>(&mut slots, 1, work, |_, part| {
-        for (a, r) in part {
-            *r = a.take().map(&f);
-        }
-    });
-    (slots.into_iter())
-        .map(|(_, r)| match r {
-            Some(r) => r,
-            None => unreachable!("every item is mapped"),
-        })
-        .collect()
-}
-
-pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync + Send) {
-    let mut slots: Vec<Option<A>> = items.into_iter().map(Some).collect();
-    chunks_mut::<Rayon, _>(&mut slots, 1, work, |_, part| {
-        part.iter_mut().filter_map(Option::take).for_each(&f)
-    });
+pub(crate) fn for_each_owned<A: Send>(items: Vec<A>, work: Work<'_>, f: impl Fn(A) + Sync) {
+    map_owned::<Rayon, A, ()>(items, work, f);
 }
 
 pub(crate) fn sort_unstable_by_key<T: Send, K: Ord>(
@@ -160,24 +137,10 @@ fn join_on<A: Send, B: Send>(a: impl FnOnce() -> A + Send, b: impl FnOnce() -> B
     match current() {
         Some(l) => {
             let half = Some((share_of(l.pool.threads()) / 2).max(1));
-            let (mut a, mut b) = (Some(a), Some(b));
-            let (mut ra, mut rb) = (None, None);
-            l.pool.join(
-                &mut || {
-                    if let Some(f) = a.take() {
-                        ra = Some(as_piece(Some(&l), half, f));
-                    }
-                },
-                &mut || {
-                    if let Some(f) = b.take() {
-                        rb = Some(as_piece(Some(&l), half, f));
-                    }
-                },
-            );
-            match (ra, rb) {
-                (Some(ra), Some(rb)) => (ra, rb),
-                _ => unreachable!("a pool runs every piece"),
-            }
+            l.join(
+                || as_piece(Some(&l), half, a),
+                || as_piece(Some(&l), half, b),
+            )
         }
         // https://github.com/milanofthe/rslab/issues/292
         None => {
@@ -194,16 +157,8 @@ pub(crate) fn enter<R: Send>(work: f64, f: impl FnOnce() -> R + Send) -> R {
     }
     match current() {
         Some(l) => {
-            let (mut f, mut r) = (Some(carried(f)), None);
-            l.pool.enter(&mut || {
-                if let Some(f) = f.take() {
-                    r = Some(rspool::install_lent(l.clone(), f));
-                }
-            });
-            match r {
-                Some(r) => r,
-                None => unreachable!("a pool runs what it enters"),
-            }
+            let f = carried(f);
+            l.enter(|| install_lent(l.clone(), f))
         }
         None if ::rayon::current_thread_index().is_none() && ::rayon::current_num_threads() > 1 => {
             ::rayon::join(carried(f), || ()).0
@@ -263,18 +218,7 @@ pub(crate) fn scope<'s, R: Send>(
 
 fn scope_on<'s, R: Send>(body: impl for<'a> FnOnce(&Scope<'a, 's>) -> R + Send + 's) -> R {
     match current() {
-        Some(l) => {
-            let (mut body, mut r) = (Some(body), None);
-            l.pool.scope(&mut |sp: &dyn Spawn<'s>| {
-                if let Some(f) = body.take() {
-                    r = Some(f(&Scope(ScopeOn::Lent(sp, &l))));
-                }
-            });
-            match r {
-                Some(r) => r,
-                None => unreachable!("a pool runs the body of its scope"),
-            }
-        }
+        Some(l) => l.scope(|sp| body(&Scope(ScopeOn::Lent(sp, &l)))),
         None => {
             let node = rsprobe::current();
             ::rayon::scope(|sc| {
