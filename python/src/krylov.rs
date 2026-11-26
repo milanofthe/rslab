@@ -268,19 +268,17 @@ enum Method<'a, 'py> {
     Cocr,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn plain(
     py: Python<'_>,
-    n: usize,
-    indptr: PyReadonlyArray1<i64>,
-    indices: PyReadonlyArray1<i64>,
-    data: &Bound<'_, PyAny>,
+    operator: Operator<'_>,
     b: &Bound<'_, PyAny>,
     tol: f64,
     maxit: usize,
     method: Method<'_, '_>,
 ) -> PyResult<PyObject> {
+    let (n, indptr, indices, data) = operator;
     let pat = Pattern::from_py(n, &indptr, &indices)?;
+    let data = &data;
     with_dtype!(data, |T| {
         let a = pat.operator::<T>(vector(data, "data")?)?;
         let pc = &NoPreconditioner;
@@ -320,7 +318,14 @@ pub fn gmres_plain(
         restart,
         x0: x0.as_ref(),
     };
-    plain(py, n, indptr, indices, data, b, tol, maxit, method)
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        method,
+    )
 }
 
 /// Unpreconditioned block GMRES on the CSC matrix ``(n, indptr, indices, data)``.
@@ -346,7 +351,14 @@ pub fn gmres_block_plain(
         restart,
         x0: x0.as_ref(),
     };
-    plain(py, n, indptr, indices, data, b, tol, maxit, method)
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        method,
+    )
 }
 
 /// Unpreconditioned COCG on the CSC matrix ``(n, indptr, indices, data)``.
@@ -366,7 +378,14 @@ pub fn cocg_plain(
     tol: f64,
     maxit: usize,
 ) -> PyResult<PyObject> {
-    plain(py, n, indptr, indices, data, b, tol, maxit, Method::Cocg)
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        Method::Cocg,
+    )
 }
 
 /// Unpreconditioned COCR on the CSC matrix ``(n, indptr, indices, data)``.
@@ -386,5 +405,12 @@ pub fn cocr_plain(
     tol: f64,
     maxit: usize,
 ) -> PyResult<PyObject> {
-    plain(py, n, indptr, indices, data, b, tol, maxit, Method::Cocr)
+    plain(
+        py,
+        (n, indptr, indices, data.clone()),
+        b,
+        tol,
+        maxit,
+        Method::Cocr,
+    )
 }
