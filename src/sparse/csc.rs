@@ -245,8 +245,12 @@ impl<T: Scalar> CscMatrix<T> {
     /// Expand the lower-triangle CSC to a full symmetric sparsity pattern
     /// (see the free function `symmetric_pattern`).
     pub fn symmetric_pattern(&self) -> CscPattern {
-        symmetric_pattern(self.n, &self.col_ptr, &self.row_idx)
-            .unwrap_or_else(|| unreachable!("usize holds every index"))
+        symmetric_fill(
+            self.n,
+            &self.col_ptr,
+            &self.row_idx,
+            symmetric_counts(self.n, &self.col_ptr, &self.row_idx),
+        )
     }
 
     /// Symmetric matrix-vector product: y = A * x.
@@ -303,61 +307,50 @@ pub fn symmetric_pattern<I: PatternIndex>(
     col_ptr: &[usize],
     row_idx: &[usize],
 ) -> Option<CscPattern<I>> {
+    let counts = symmetric_counts(n, col_ptr, row_idx);
+    if n > I::MAX || counts.total > I::MAX {
+        return None;
+    }
+    Some(symmetric_fill(n, col_ptr, row_idx, counts))
+}
+
+enum ColumnCounts {
     // `above[c]`: entries of row `c` left of the diagonal.
+    Lower { above: Vec<usize> },
+    // Not a lower triangle: place and sort.
+    Unsorted { col_counts: Vec<usize> },
+}
+
+struct SymmetricCounts {
+    columns: ColumnCounts,
+    total: usize,
+}
+
+fn symmetric_counts(n: usize, col_ptr: &[usize], row_idx: &[usize]) -> SymmetricCounts {
     let mut above = vec![0usize; n];
     for j in 0..n {
         for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
             if i < j {
-                // Not a lower triangle: place and sort.
-                return symmetric_pattern_sorted(n, col_ptr, row_idx);
+                return unsorted_counts(n, col_ptr, row_idx, above);
             }
             if i != j {
                 above[i] += 1;
             }
         }
     }
-    let total = row_idx.len() + above.iter().sum::<usize>();
-    if n > I::MAX || total > I::MAX {
-        return None;
+    SymmetricCounts {
+        total: row_idx.len() + above.iter().sum::<usize>(),
+        columns: ColumnCounts::Lower { above },
     }
-    let mut out_ptr = Vec::with_capacity(n + 1);
-    let mut next = Vec::with_capacity(n);
-    out_ptr.push(I::of(0));
-    for c in 0..n {
-        let at = out_ptr[c].get();
-        next.push(at);
-        out_ptr.push(I::of(at + above[c] + (col_ptr[c + 1] - col_ptr[c])));
-    }
-    let mut out_idx = vec![I::of(0); total];
-    for j in 0..n {
-        let own = &row_idx[col_ptr[j]..col_ptr[j + 1]];
-        let at = out_ptr[j].get() + above[j];
-        for (d, &i) in out_idx[at..at + own.len()].iter_mut().zip(own) {
-            *d = I::of(i);
-        }
-        for &i in own {
-            if i != j {
-                out_idx[next[i]] = I::of(j);
-                next[i] += 1;
-            }
-        }
-    }
-    Some(CscPattern {
-        n,
-        col_ptr: out_ptr,
-        row_idx: out_idx,
-    })
 }
 
-/// [`symmetric_pattern`] of any pattern, by
-/// placing both entries of each pair and sorting every column.
-fn symmetric_pattern_sorted<I: PatternIndex>(
+fn unsorted_counts(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
-) -> Option<CscPattern<I>> {
-    // Count entries per column in the full pattern
-    let mut col_counts = vec![0usize; n];
+    mut col_counts: Vec<usize>,
+) -> SymmetricCounts {
+    col_counts.fill(0);
     for j in 0..n {
         for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
             col_counts[j] += 1; // lower triangle entry in column j
@@ -366,48 +359,87 @@ fn symmetric_pattern_sorted<I: PatternIndex>(
             }
         }
     }
-    let pat_nnz = col_counts.iter().sum::<usize>();
-    if n > I::MAX || pat_nnz > I::MAX {
-        return None;
+    SymmetricCounts {
+        total: col_counts.iter().sum::<usize>(),
+        columns: ColumnCounts::Unsorted { col_counts },
     }
+}
 
-    // Build col_ptr
-    let mut pat_col_ptr = Vec::with_capacity(n + 1);
-    let mut offsets = Vec::with_capacity(n);
-    pat_col_ptr.push(I::of(0));
-    for j in 0..n {
-        let at = pat_col_ptr[j].get();
-        offsets.push(at);
-        pat_col_ptr.push(I::of(at + col_counts[j]));
-    }
-    let mut pat_row_idx = vec![I::of(0); pat_nnz];
+fn symmetric_fill<I: PatternIndex>(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    counts: SymmetricCounts,
+) -> CscPattern<I> {
+    match counts.columns {
+        ColumnCounts::Lower { above } => {
+            let mut out_ptr = Vec::with_capacity(n + 1);
+            let mut next = Vec::with_capacity(n);
+            out_ptr.push(I::of(0));
+            for c in 0..n {
+                let at = out_ptr[c].get();
+                next.push(at);
+                out_ptr.push(I::of(at + above[c] + (col_ptr[c + 1] - col_ptr[c])));
+            }
+            let mut out_idx = vec![I::of(0); counts.total];
+            for j in 0..n {
+                let own = &row_idx[col_ptr[j]..col_ptr[j + 1]];
+                let at = out_ptr[j].get() + above[j];
+                for (d, &i) in out_idx[at..at + own.len()].iter_mut().zip(own) {
+                    *d = I::of(i);
+                }
+                for &i in own {
+                    if i != j {
+                        out_idx[next[i]] = I::of(j);
+                        next[i] += 1;
+                    }
+                }
+            }
+            CscPattern {
+                n,
+                col_ptr: out_ptr,
+                row_idx: out_idx,
+            }
+        }
+        ColumnCounts::Unsorted { col_counts } => {
+            let mut pat_col_ptr = Vec::with_capacity(n + 1);
+            let mut offsets = Vec::with_capacity(n);
+            pat_col_ptr.push(I::of(0));
+            for j in 0..n {
+                let at = pat_col_ptr[j].get();
+                offsets.push(at);
+                pat_col_ptr.push(I::of(at + col_counts[j]));
+            }
+            let mut pat_row_idx = vec![I::of(0); counts.total];
 
-    // Place entries
-    for j in 0..n {
-        for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
-            // (i, j) in lower triangle
-            pat_row_idx[offsets[j]] = I::of(i);
-            offsets[j] += 1;
-            if i != j {
-                // (j, i) - transpose
-                pat_row_idx[offsets[i]] = I::of(j);
-                offsets[i] += 1;
+            // Place entries
+            for j in 0..n {
+                for &i in &row_idx[col_ptr[j]..col_ptr[j + 1]] {
+                    // (i, j) in lower triangle
+                    pat_row_idx[offsets[j]] = I::of(i);
+                    offsets[j] += 1;
+                    if i != j {
+                        // (j, i) - transpose
+                        pat_row_idx[offsets[i]] = I::of(j);
+                        offsets[i] += 1;
+                    }
+                }
+            }
+
+            // Sort row indices within each column
+            for j in 0..n {
+                let start = pat_col_ptr[j].get();
+                let end = pat_col_ptr[j + 1].get();
+                pat_row_idx[start..end].sort_unstable();
+            }
+
+            CscPattern {
+                n,
+                col_ptr: pat_col_ptr,
+                row_idx: pat_row_idx,
             }
         }
     }
-
-    // Sort row indices within each column
-    for j in 0..n {
-        let start = pat_col_ptr[j].get();
-        let end = pat_col_ptr[j + 1].get();
-        pat_row_idx[start..end].sort_unstable();
-    }
-
-    Some(CscPattern {
-        n,
-        col_ptr: pat_col_ptr,
-        row_idx: pat_row_idx,
-    })
 }
 
 #[cfg(test)]
