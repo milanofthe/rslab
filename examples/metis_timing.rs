@@ -61,8 +61,6 @@ fn grid3d(m: usize) -> (Vec<i32>, Vec<i32>) {
     (cp, ri)
 }
 
-/// Exact scalar nnz(L) of the permuted full symmetric pattern (etree + GNP
-/// column counts, as the ordering race scores its candidates).
 fn exact_fill(cp: &[i32], ri: &[i32], perm: &[i32]) -> usize {
     let n = cp.len() - 1;
     let pattern = rslab::CscPattern {
@@ -129,7 +127,6 @@ fn main() {
     ];
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".into());
     if which.ends_with(".mtx") {
-        // A symmetric Matrix Market file: symmetrize the lower pattern.
         let rslab::MtxLoaded::Symmetric(a) =
             rslab::read_mtx_any(std::path::Path::new(&which)).unwrap()
         else {

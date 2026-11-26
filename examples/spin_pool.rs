@@ -17,8 +17,7 @@ struct Shared {
     done: AtomicUsize,
     active: AtomicUsize,
     stop: AtomicBool,
-    /// A section in progress: one opened meanwhile runs on its thread.
-    busy: AtomicBool,
+    section_in_progress: AtomicBool,
 }
 
 impl Shared {
@@ -69,7 +68,7 @@ impl rslab::parallel::Pool for Spin {
     }
     fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         let sh = &*self.shared;
-        if n < 2 || sh.busy.swap(true, SeqCst) {
+        if n < 2 || sh.section_in_progress.swap(true, SeqCst) {
             (0..n).for_each(f);
             return;
         }
@@ -89,6 +88,6 @@ impl rslab::parallel::Pool for Spin {
         while sh.active.load(SeqCst) != 0 {
             std::hint::spin_loop();
         }
-        sh.busy.store(false, SeqCst);
+        sh.section_in_progress.store(false, SeqCst);
     }
 }

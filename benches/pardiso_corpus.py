@@ -67,6 +67,7 @@ import scipy.sparse as sp
 
 OUT = Path(__file__).resolve().parent / 'bench_out' / 'pardiso_corpus.jsonl'
 TARGET = 1e-10
+IPARM_TWO_LEVEL_FACTORIZATION = 23
 
 
 def load(path):
@@ -97,7 +98,6 @@ class Rslab:
     def __init__(self, path, settings, threads):
         import rslab
         self.rslab, self.path, self.factor = rslab, path, None
-        # An older revision runs without the settings it does not know, and says which.
         kind = rslab.KluSettings if path == 'klu' else rslab.Settings
         self.dropped = []
         for key, value in settings.items():
@@ -106,7 +106,6 @@ class Rslab:
             except (TypeError, ValueError):
                 self.dropped.append(key)
         settings = {k: v for k, v in settings.items() if k not in self.dropped}
-        # KLU parallelizes over its BTF blocks on its own and takes no count.
         self.settings = settings if path == 'klu' else {'threads': threads, **settings}
 
     def analyze(self, a):
@@ -114,10 +113,10 @@ class Rslab:
 
     def factorize(self, a):
         if self.factor is not None and self.path == 'klu':
-            self.factor.refactor(a)  # KLU keeps its pivot sequence across a sweep
+            self.factor.refactor(a)
             return
         numeric = {k: v for k, v in self.settings.items() if k != 'ordering'}
-        self.factor = None  # free the previous factor first, as PARDISO reuses its storage
+        self.factor = None
         self.factor = self.sym.factor(a, **numeric)
 
     def solve(self, b):
@@ -126,7 +125,6 @@ class Rslab:
     def report(self):
         d = self.factor.diagnostics()
         est = self.sym.estimate_memory(str(np.dtype(self.dtype)))
-        # `stages` (the stage times) only from the revisions before the rsprobe record.
         stages = d.get('stages', [])
         return {'stages': {s['name']: s['wall_ms'] / 1e3 for s in stages},
                 'factor_nnz': d.get('factor_nnz'), 'decisions': d.get('decisions'),
@@ -181,9 +179,9 @@ class Pardiso:
         self.mtype = (-2 if real else 6) if self.kind == 'ldlt' else (11 if real else 13)
         self.mkl.pardisoinit(self.pt.ctypes, ctypes.byref(ctypes.c_int32(self.mtype)), self.iparm.ctypes)
         for index, value in self.settings.get('iparm', {}).items():
-            self.iparm[int(index)] = value  # zero-based overrides from the corpus
+            self.iparm[int(index)] = value
         if self.two_level:
-            self.iparm[23] = 1  # iparm(24): the two-level factorization, Intel's advice for many threads
+            self.iparm[IPARM_TWO_LEVEL_FACTORIZATION] = 1
         self.n = stored.shape[0]
         self.ia = (stored.indptr + 1).astype(np.int32)
         self.ja = (stored.indices + 1).astype(np.int32)
@@ -200,8 +198,6 @@ class Pardiso:
         return x.T
 
     def report(self):
-        # iparm(14..18), one-based: perturbed pivots, peak analysis, permanent and factor memory in
-        # KB, nnz of the factors.
         return {'peak_analysis_kb': int(self.iparm[14]), 'permanent_kb': int(self.iparm[15]),
                 'factor_kb': int(self.iparm[16]), 'factor_nnz': int(self.iparm[17]),
                 'numeric': {'perturbed': int(self.iparm[13])},
@@ -237,13 +233,9 @@ def measure(name, first, second, repeats, warmup, threads):
     a2, b2, _ = load(second)
     path = meta['path']
     runs, report = [], {}
-    # The solver's library loaded before the baseline: the peak is the solver's work alone,
-    # not the size of its binary (two revisions' wheels differ in it).
     SOLVERS[name.split('@')[0]](path, {}, threads)
     base_mb = working_set_mb()[0]
     for round_ in range(warmup + repeats):
-        # A variant takes the production settings of its family (`pardiso-2l`: `pardiso`), a
-        # revision those of its solver (`rslab@main`: `rslab`).
         kind = name.split('@')[0]
         solver = SOLVERS[kind](path, meta.get('settings', {}).get(kind.split('-')[0], {}), threads)
         solver.dtype = a.dtype
@@ -257,8 +249,6 @@ def measure(name, first, second, repeats, warmup, threads):
         t4 = clock(); x2 = solver.solve(b2)
         t5 = clock()
         steps, res = 0, residual(a2, x2, b2)
-        # Until the target, or until a step no longer lowers the residual (refinement that
-        # diverges or stalls where the factor cannot get further); that step is not kept.
         while res > TARGET and steps < 50:
             x_next = x2 + solver.solve(b2 - a2 @ x2)
             res_next = residual(a2, x_next, b2)
@@ -484,7 +474,6 @@ def main():
     args = p.parse_args()
     if args.worker:
         name, first, second = args.worker
-        # Before MKL loads: it reads the count once.
         os.environ['MKL_NUM_THREADS'] = str(args.threads)
         try:
             result = measure(name, Path(first), Path(second), args.repeats, args.warmup, args.threads)
@@ -508,7 +497,6 @@ def main():
         labels = []
         for spec in args.rslab:
             label, python, rev = build_revision(spec, args.build_dir)
-            # The same revision twice (A against A, the noise) gets a second label.
             while label in labels:
                 label += "'"
             labels.append(label)
@@ -517,7 +505,6 @@ def main():
     else:
         solvers = args.solvers if args.solvers is not None else list(SOLVERS)
     files = sorted(f for i in args.inputs for f in (i.rglob('*.npz') if i.is_dir() else [i]))
-    # Sweep partners are refactorization values, not systems of their own.
     files = [f for f in files if not any(partner(g) == f and g != f for g in files)]
     files = selected(files, args.family)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -527,7 +514,6 @@ def main():
     rows = []
     for f in files:
         for round_ in range(args.rounds):
-            # With revisions to compare, the reference solvers run once: they are no side of it.
             for name in [s for s in solvers if round_ == 0 or s in pythons or not pythons]:
                 cmd = [str(pythons.get(name, sys.executable)), __file__, '--worker', name, str(f),
                        str(partner(f)), '--threads', str(threads), '--repeats', str(args.repeats),

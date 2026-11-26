@@ -10,8 +10,6 @@ use rslab::{
     SolverSettings, Threads,
 };
 
-/// 2D 5-point grid (k x k), diagonally dominant; `full` gives both
-/// triangles with a small skew on the couplings, else the lower triangle.
 fn grid<T: Scalar>(k: usize, full: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<T>) {
     let n = k * k;
     let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
@@ -42,11 +40,10 @@ fn grid<T: Scalar>(k: usize, full: bool) -> (usize, Vec<usize>, Vec<usize>, Vec<
     (n, rows, cols, vals)
 }
 
-/// The prediction within `tol` of what was built, never below it.
 fn close(what: &str, predicted: u64, actual: u64, tol: f64) {
     assert!(
         predicted >= actual && predicted as f64 <= actual as f64 * (1.0 + tol),
-        "{what}: predicted {predicted}, built {actual}"
+        "{what}: predicted {predicted} is not within {tol} above the built {actual}"
     );
 }
 
@@ -72,8 +69,11 @@ fn check_ldlt<T: Scalar>() {
     );
     assert!(plan.peak_bytes() >= plan.resident_bytes() + plan.solve_bytes);
     assert_eq!((plan.threads, plan.nrhs), (4, 3));
-    // Factored once, the analysis has nothing more to grow.
-    assert_eq!(sym.memory_plan::<T>(&opts(), 1).analysis_growth_bytes, 0);
+    assert_eq!(
+        sym.memory_plan::<T>(&opts(), 1).analysis_growth_bytes,
+        0,
+        "the analysis still grows after it was factored once"
+    );
 }
 
 fn check_lu<T: Scalar>() {
@@ -97,8 +97,6 @@ fn check_klu<T: Scalar>() {
     let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
     let plan = sym.memory_plan::<T>(&KluSettings::default(), 1);
     let f = sym.factor(&a, &KluSettings::default()).unwrap();
-    // Diagonally dominant: the pivots stay on the diagonal, so the
-    // symbolic fill the plan prices is the fill the factor holds.
     close("klu factor", plan.factor_bytes, f.heap_bytes(), 0.01);
     assert_eq!(plan.analysis_bytes, sym.heap_bytes());
 }

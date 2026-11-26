@@ -22,12 +22,9 @@ use std::sync::Mutex;
 
 thread_local!(static IN_PROGRESS: Cell<usize> = const { Cell::new(0) });
 
-/// A task of the sweep in progress on this worker, counted until it ends
-/// (or unwinds).
 struct InProgress;
 
 impl InProgress {
-    /// The task `k` started; fails if another one is in progress here.
     fn start(k: usize) -> Self {
         let others = IN_PROGRESS.with(|d| d.replace(d.get() + 1));
         let task = InProgress;
@@ -45,24 +42,14 @@ impl Drop for InProgress {
     }
 }
 
-/// The entries of the grid Laplacian plus `shift` on the diagonal, in the
-/// pattern's order.
 fn laplacian(rows: &[usize], cols: &[usize], shift: f64) -> Vec<f64> {
     (rows.iter().zip(cols))
         .map(|(&r, &c)| if r == c { 4.0 + shift } else { -1.0 })
         .collect()
 }
 
-/// Workers of the sweeps' pool.
 const WORKERS: usize = 4;
 
-/// `tasks` tasks of a sweep on a foreign pool, each with the state `init`
-/// makes per worker; fails at the first task that starts on a worker with
-/// another task in progress. Every task is a job of its own, spawned up
-/// front: the tasks wait in the queue of the worker that spawned them, and a
-/// worker done with one looks for the next in the other workers' queues, so
-/// a section of rslab run on the sweep's pool has its pieces taken while
-/// tasks still wait, and its worker, waiting for them, takes a task.
 fn sweep<S: Send>(tasks: usize, init: impl Fn() -> S + Sync, task: impl Fn(&mut S, usize) + Sync) {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(WORKERS)
@@ -84,8 +71,6 @@ fn sweep<S: Send>(tasks: usize, init: impl Fn() -> S + Sync, task: impl Fn(&mut 
     });
 }
 
-/// A sweep of supernodal factorizations under `solver`, each followed by
-/// `solves` solves.
 fn factor_sweep(solver: SolverSettings, solves: usize) {
     let m = 32;
     let n = m * m;
@@ -111,16 +96,11 @@ fn factor_sweep(solver: SolverSettings, solves: usize) {
     );
 }
 
-/// One worker per factorization, as a sweep of many points runs them: the
-/// factorization in a pool of its own, the solve on the calling thread.
 #[test]
 fn a_sweep_of_serial_factorizations_does_not_nest() {
     factor_sweep(SolverSettings::default().with_threads(Threads::Fixed(1)), 1);
 }
 
-/// Two workers per factorization and every solve on the pool, several solves
-/// per factorization: they run in a pool of their own, the sweep's worker
-/// waiting for it without taking work.
 #[test]
 fn a_sweep_of_parallel_factorizations_and_solves_does_not_nest() {
     let mut solver = SolverSettings::default().with_threads(Threads::Fixed(2));
@@ -128,9 +108,6 @@ fn a_sweep_of_parallel_factorizations_and_solves_does_not_nest() {
     factor_sweep(solver, 8);
 }
 
-/// Block GMRES preconditioned by a factor of two workers: its
-/// orthogonalization runs in a pool of the factor's width, entered without
-/// taking the sweep's work.
 #[test]
 fn a_sweep_of_krylov_solves_does_not_nest() {
     let m = 30;

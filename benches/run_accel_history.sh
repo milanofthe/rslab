@@ -1,29 +1,4 @@
 #!/usr/bin/env bash
-# Release history vs Apple Accelerate: run the *same* matrices through the
-# `auto` path of every release binary, so the head-to-head ratio can be tracked
-# over the project's history instead of only at HEAD.
-#
-# Why this works: the bench harness emits the same JSONL, calls the same public
-# `tuned()` entry point, and `build_family` plus `src/matgen` are byte-identical
-# from v0.19.1 on, so every version sees exactly the same matrices. Accelerate is
-# an external library and is measured once per round by the newest binary.
-#
-# Two phases:
-#   1. build - one worktree + `cargo bench --no-run` per tag, binaries stashed in
-#      $WORK/bin/<tag> (a shared CARGO_TARGET_DIR keeps the dependency builds).
-#   2. run   - ROUNDS round-robin passes over all versions on the same sizes, so
-#      thermal drift hits every version equally; the aggregate takes the minimum
-#      per (version, matrix, solver).
-#
-# Output: benches/bench_out/accel_history.jsonl (committed - it needs the old
-# binaries and is not regeneratable from HEAD alone).
-#
-# Usage: benches/run_accel_history.sh          # build + run + aggregate
-#        ROUNDS=3 benches/run_accel_history.sh
-#        SKIP_BUILD=1 benches/run_accel_history.sh
-#        SKIP_BUILD=1 ROUND_START=3 ROUNDS=5 benches/run_accel_history.sh
-#          (adds rounds 3-5 to an existing run; the aggregate always folds
-#           every round file in the output dir)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -32,17 +7,10 @@ ROUNDS=${ROUNDS:-2}
 OUT=$WORK/out
 mkdir -p "$WORK/bin" "$WORK/wt" "$OUT"
 
-# Every release the bench harness can run. v0.17.0 is the floor: bench_suite.rs
-# does not exist before it, and from there on the harness, the `auto` entry point
-# and the generators are unchanged (the nnz cross-check in the aggregate proves
-# it per matrix). Append the new tag on release.
 TAGS=${TAGS:-"v0.17.0 v0.18.0 v0.19.0 v0.19.1 v0.20.0 v0.21.0 v0.22.0 v0.23.0 \
 v0.24.0 v0.25.0 v0.26.0 v0.26.1 v0.26.2 v0.26.3 v0.26.4 v0.27.0"}
 HEAD_TAG=${HEAD_TAG:-v$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')}
 
-# The reduced head-to-head grid (9 log-spaced sizes 4k-110k for the generator
-# families, 8 sizes 4k-200k for the circuit family) - the same points the README
-# head-to-head table is computed on.
 SIZES=${SIZES:-4000,6053,9160,13861,20976,31743,48035,72690,110000}
 CSIZES=${CSIZES:-4000,6995,12232,21389,37402,65405,114372,200000}
 
@@ -63,25 +31,23 @@ fi
 
 export RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-8}
 export RLA_BENCH_MEM=0
-run() { # tag family sizes solvers round
-  local out="$OUT/$1_r$5_$2.jsonl"
+run() {
+  local tag=$1 family=$2 sizes=$3 solvers=$4 round=$5
+  local out="$OUT/${tag}_r${round}_${family}.jsonl"
   : > "$out"
-  RLA_BENCH_FAMILY=$2 RLA_BENCH_SIZES=$3 RLA_BENCH_SOLVERS=$4 RLA_BENCH_OUT=$out \
-    "$WORK/bin/$1" >/dev/null 2>&1 || echo "  ! $1 $2 failed"
-  echo "  $1 $2 r$5: $(wc -l < "$out" | tr -d ' ') records"
+  RLA_BENCH_FAMILY=$family RLA_BENCH_SIZES=$sizes RLA_BENCH_SOLVERS=$solvers RLA_BENCH_OUT=$out \
+    "$WORK/bin/$tag" >/dev/null 2>&1 || echo "  ! $tag $family failed"
+  echo "  $tag $family r$round: $(wc -l < "$out" | tr -d ' ') records"
 }
 
 for r in $(seq "${ROUND_START:-1}" "$ROUNDS"); do
   echo "=== round $r ==="
   for v in $TAGS $HEAD_TAG; do
     [ -x "$WORK/bin/$v" ] || { echo "  ! no binary for $v"; continue; }
-    # Accelerate is measured by the newest binary only (external library, and the
-    # shim's variant pick is itself part of the harness, not of rslab).
     if [ "$v" = "$HEAD_TAG" ]; then gen=auto,accel; circ=auto,klu,accel
     else gen=auto; circ=auto,klu; fi
     run "$v" sym "$SIZES" "$gen" "$r"
     run "$v" unsym "$SIZES" "$gen" "$r"
-    # The circuit family entered the harness in v0.23.0.
     case $v in v0.20.0|v0.21.0|v0.22.0) ;; *) run "$v" circuit "$CSIZES" "$circ" "$r" ;; esac
   done
 done

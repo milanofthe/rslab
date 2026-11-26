@@ -22,13 +22,7 @@ import matplotlib.pyplot as plt
 import bench_style
 from bench_style import GRAY, SOLVERS
 
-# The auto-tuned default (`LdltSolver::factor` / `LuSolver::factor`) is the product
-# RSLAB ships; we plot that single curve against the external solvers.
 ORDER = ["auto", "faer", "pardiso", "superlu"]
-# SuperLU's peak memory is sampled process RSS from a SciPy child (splu exposes no peak),
-# which is not comparable to the in-process live-bytes / iparm peaks and is unreliable
-# (it records 0 MB on fast factorizations the 2 ms sampler misses). It is therefore shown
-# only on the time axis, not the memory axis.
 MEM_ORDER = ["auto", "faer", "pardiso"]
 
 
@@ -55,12 +49,8 @@ def plot_metric(recs, metric, value_key, ylabel, title, out=None, order=ORDER, a
         x = np.array([p[0] for p in pts], float)
         y = np.array([p[1] for p in pts], float)
         ax.scatter(x, y, s=42, c=color, marker=marker, alpha=0.8, edgecolors="none", zorder=3)
-        # Power-law fit in log-log space: log y = alpha*log x + log C.
         alpha, logc = np.polyfit(np.log(x), np.log(y), 1)
         xs = np.array([x.min(), x.max()])
-        # Standalone: exponent in the legend. Panel mode: shared legend carries only
-        # solver identity, so annotate the exponent on the line (offset points +
-        # clipped, so the tight bbox does not blow up on the log axis).
         fit_label = None if not own_fig else f"{label}  (n={len(pts)}, $\\alpha$={alpha:.2f})"
         ax.plot(xs, np.exp(logc) * xs ** alpha, color=color, lw=2, alpha=0.9, zorder=2,
                 label=fit_label)
@@ -100,8 +90,6 @@ def plot_residual(recs, out, order=ORDER):
         ax.scatter(x, y, s=42, c=color, marker=marker, alpha=0.8, edgecolors="none",
                    label=f"{label} (n={len(pts)})")
     ax.axhline(1e-8, color=GRAY, ls="--", lw=1.2, alpha=0.7)
-    # Axes-fraction x (data y) - placing the label at data-x on a log axis blows up
-    # the tight bbox (runaway figure width), so anchor it to the axes, not the data.
     ax.text(0.01, 1.3e-8, "accuracy target 1e-8", color=GRAY, fontsize=8,
             va="bottom", ha="left", transform=ax.get_yaxis_transform())
     ax.set_xscale("log")

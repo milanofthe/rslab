@@ -19,11 +19,6 @@ use rslab::{GeneralCsc, KluSettings, KluSymbolic, LuSolver, SolverSettings};
 mod xorshift;
 use xorshift::Rng;
 
-/// MNA-like circuit matrix: n nodes in `n_stages` cascaded stages (signal
-/// flows one way between stages -> reducible), each stage internally coupled
-/// (local 2D neighborhood + a few long-range couplings -> irreducible blocks
-/// of stage size). Diagonal ~ sum of couplings (conductance-like), values
-/// unsymmetric.
 fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
     let mut rng = Rng(seed | 1);
     let (mut r, mut c, mut v) = (Vec::new(), Vec::new(), Vec::new());
@@ -40,8 +35,6 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
             },
         );
         let span = hi - lo;
-        // local neighborhood within the stage (wraps -> strongly connected);
-        // slightly unsymmetric conductances
         for &t in &[1usize, 2, 17] {
             let i = lo + (j - lo + t) % span;
             if i != j {
@@ -57,7 +50,6 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
                 colsum[i] += g2;
             }
         }
-        // one-directional inter-stage feed (previous stage listens)
         if s > 0 && (j - lo) % 3 == 0 {
             let i = lo - stage + (j - lo) % stage;
             let g = 0.2 + 0.3 * rng.next_f64().abs();
@@ -67,22 +59,15 @@ fn circuit(n: usize, n_stages: usize, seed: u64) -> GeneralCsc<f64> {
             colsum[j] += g;
         }
     }
-    // grounded-capacitor margin keeps every column strictly diagonally
-    // dominant: the condition number stays O(1) at every size
     for (j, &cs) in colsum.iter().enumerate() {
         r.push(j);
         c.push(j);
-        v.push(cs + 0.1 + 0.1 * rng.next_f64().abs());
+        let dominance_margin = 0.1 + 0.1 * rng.next_f64().abs();
+        v.push(cs + dominance_margin);
     }
     GeneralCsc::from_triplets(n, &r, &c, &v).unwrap()
 }
 
-// ---- SuiteSparse KLU reference (runtime FFI, LGPL library loaded only for
-// measurement; nothing distributed) --------------------------------------------
-// Shared loader in `benches/ss_klu_ref.rs`: compiles `benches/klu_shim.c` on
-// demand against the locally installed SuiteSparse (RLA_KLU_SS_PREFIX; platform
-// defaults inside) and loads it via libloading - the same pattern as the
-// MKL / Accelerate shims.
 #[path = "ss_klu_ref.rs"]
 mod ss_klu_ref;
 use ss_klu_ref::{resid, SsKlu};
@@ -91,11 +76,6 @@ use ss_klu_ref::{resid, SsKlu};
 pub mod constants;
 use constants::{solve_backward_error, U64};
 
-/// Settings sweep (`RLA_KLU_SWEEP=1`): grid over the three KLU knobs on the
-/// circuit family plus a badly row-scaled variant, warm best-of-3 per config.
-/// Evidence base for the KLU default-settings choice (heuristic defaults work,
-/// 2026-07): confirms/updates that `pivot_threshold=1e-3, row_scaling=on, btf=on`
-/// is on the speed/fill/robustness Pareto front.
 fn settings_sweep() {
     println!(
         "{:>10} {:>8} {:>5} {:>5} | {:>9} {:>9} {:>9} {:>10} {:>7} {:>9}",
@@ -109,9 +89,6 @@ fn settings_sweep() {
     ] {
         let mut a = circuit(n, stages, 0xC0FFEE ^ n as u64);
         if bad_scaling {
-            // Row scaling over ~12 orders of magnitude: the robustness case
-            // row_scaling is for (badly equilibrated device models).
-            // CSC: row i of the matrix appears via row_idx - scale per row.
             let scale = |i: usize| 10f64.powi(((i * 7919) % 13) as i32 - 6);
             for (k, &i) in a.row_idx.iter().enumerate() {
                 a.values[k] *= scale(i);
@@ -213,7 +190,6 @@ fn main() {
         let a = circuit(n, stages, 0xC0FFEE ^ n as u64);
         let b: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
 
-        // --- KLU ---
         let t = Instant::now();
         let sym = KluSymbolic::analyze(&a, &KluSettings::default()).unwrap();
         let t_ana = t.elapsed();
@@ -230,7 +206,6 @@ fn main() {
         let klu_nnz = klu.factor_nnz();
         let blocks = klu.n_blocks();
 
-        // --- supernodal LU (defaults) ---
         let t = Instant::now();
         let f = LuSolver::factor(&a, &SolverSettings::default()).unwrap();
         let t_mf_fac = t.elapsed();
@@ -248,7 +223,6 @@ fn main() {
             "supernodal residual {mf_res}"
         );
 
-        // --- sweep proxy: 20 value sets, same pattern ---
         let t = Instant::now();
         for k in 0..SWEEP {
             let scale = 1.0 + 0.03 * k as f64;
@@ -297,7 +271,6 @@ fn main() {
             "", klu_res, mf_res
         );
 
-        // --- parallel per-block factor + refactor (opt-in, ambient pool) ---
         let t = Instant::now();
         let mut klu_par = sym
             .factor(
@@ -334,7 +307,6 @@ fn main() {
             t_sweep_klu.as_secs_f64() / t_sweep_par.as_secs_f64()
         );
 
-        // --- SuiteSparse KLU reference (same matrix, same phases) ---
         if let Some(ss) = SsKlu::try_new() {
             if let Some((r, xs)) = ss.run(&a, &b, SWEEP) {
                 let ss_res = resid(&a, &xs, &b);
@@ -357,7 +329,6 @@ fn main() {
             }
         }
 
-        // --- wide-RHS solve: batched solve_many vs per-column loop ---
         const NRHS: usize = 8;
         let bm: Vec<f64> = (0..n * NRHS).map(|k| ((k * 3) % 17) as f64 - 8.0).collect();
         let t = Instant::now();

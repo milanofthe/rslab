@@ -21,9 +21,8 @@ import numpy as np
 
 import bench_style as st
 
-TEAL = "#14b8a6"      # RSLAB KLU (house solver color)
-TEAL_DARK = "#0f766e" # RSLAB KLU parallel blocks
-AMBER = st.AMBER      # SuiteSparse KLU (reference competitor)
+RSLAB_KLU_COLOR = "#14b8a6"
+SS_KLU_COLOR = st.AMBER
 
 HERE = Path(__file__).resolve().parent
 PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "bench_out" / "klu_realworld.jsonl"
@@ -35,7 +34,6 @@ def load(path):
     by = {}
     for r in rows:
         by.setdefault((r["group"], r["name"]), {})[r["solver"]] = r
-    # keep matrices with both solvers, ascending n
     pairs = {k: v for k, v in by.items() if "rslab" in v and "ss-klu" in v}
     return dict(sorted(pairs.items(), key=lambda kv: kv[1]["rslab"]["n"]))
 
@@ -56,13 +54,13 @@ def two_panel_bars(data):
     ):
         rs = [v["rslab"][key] * 1e3 for v in data.values()]
         ss = [v["ss-klu"][key] * 1e3 for v in data.values()]
-        ax.bar(xs - w / 2, rs, w, color=TEAL, label="RSLAB KLU (pure Rust)")
-        ax.bar(xs + w / 2, ss, w, color=AMBER, label="SuiteSparse KLU (C)")
+        ax.bar(xs - w / 2, rs, w, color=RSLAB_KLU_COLOR, label="RSLAB KLU (pure Rust)")
+        ax.bar(xs + w / 2, ss, w, color=SS_KLU_COLOR, label="SuiteSparse KLU (C)")
         for x, (a, b) in zip(xs, zip(rs, ss)):
             r = b / a
             ax.text(x, max(a, b) * 1.12, f"{r:.1f}x" if r >= 1 else f"{r:.2f}x",
                     ha="center", va="bottom", fontsize=7,
-                    color=TEAL if r >= 1 else AMBER)
+                    color=RSLAB_KLU_COLOR if r >= 1 else SS_KLU_COLOR)
         ax.set_yscale("log")
         ax.set_xticks(xs)
         ax.set_xticklabels(names, fontsize=7, rotation=50, ha="right")
@@ -88,13 +86,13 @@ def social_card(data):
     gm = float(np.exp(np.mean([np.log(b / a) for a, b in zip(rs, ss)])))
 
     fig, ax = plt.subplots(figsize=(9.0, 4.8))
-    ax.bar(xs - w / 2, rs, w, color=TEAL, label="RSLAB KLU (pure Rust)")
-    ax.bar(xs + w / 2, ss, w, color=AMBER, label="SuiteSparse KLU (C)")
+    ax.bar(xs - w / 2, rs, w, color=RSLAB_KLU_COLOR, label="RSLAB KLU (pure Rust)")
+    ax.bar(xs + w / 2, ss, w, color=SS_KLU_COLOR, label="SuiteSparse KLU (C)")
     for x, (a, b) in zip(xs, zip(rs, ss)):
         r = b / a
         ax.text(x, max(a, b) * 1.12, f"{r:.1f}x" if r >= 1 else f"{r:.2f}x",
                 ha="center", va="bottom", fontsize=7.5,
-                color=TEAL if r >= 1 else AMBER)
+                color=RSLAB_KLU_COLOR if r >= 1 else SS_KLU_COLOR)
     ax.set_yscale("log")
     ax.set_xticks(xs)
     ax.set_xticklabels(names, fontsize=7, rotation=50, ha="right")
